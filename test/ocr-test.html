@@ -34,8 +34,6 @@ worker, and the PDF text layer. Takes 10–30 s on first run while the WASM core
 <script src="../js/imaging.js"></script>
 <script src="../js/pdf.js"></script>
 <script src="../vendor/tesseract/tesseract.min.js"></script>
-<script src="../vendor/onnx/ort.wasm.min.js"></script>
-<script src="../js/paddle.js"></script>
 <script src="../js/ocr.js"></script>
 <script>
 (async function () {
@@ -85,52 +83,41 @@ worker, and the PDF text layer. Takes 10–30 s on first run while the WASM core
     c.putImageData(img, 0, 0);
   })(Imaging.ctx2d(src));
 
-  ok('Tesseract script loaded', OCR.engineAvailable('tesseract'));
-  ok('onnxruntime-web loaded', OCR.engineAvailable('paddle'));
+  ok('OCR engine script loaded', OCR.available());
+  if (!OCR.available()) { done(); return; }
 
   const adj = Imaging.setFilter(Imaging.newAdjust(), 'bw');
   const processed = Imaging.pipeline(src, adj, null, 2400);
   document.getElementById('img').appendChild(processed);
 
-  const texts = {};
-  let res = null;
-
-  for (const engine of ['paddle', 'tesseract']) {
-    if (!OCR.engineAvailable(engine)) { ok(engine + ': engine available', false); continue; }
-    let r, ms;
-    try {
-      const t0 = performance.now();
-      r = await OCR.run(processed, {
-        engine: engine, lang: 'eng', psm: 6,
-        onProgress: (s, p) => {
-          document.getElementById('summary').textContent = engine + ': ' + s + ' ' + Math.round(p * 100) + '%';
-        }
-      });
-      ms = performance.now() - t0;
-    } catch (e) {
-      ok(engine + ': recognition completed', false, e && e.message);
-      continue;
-    }
-    if (engine === 'paddle') res = r;
-    texts[engine] = r.text;
-
-    ok(engine + ': recognition completed', !!r, Math.round(ms) + ' ms');
-    ok(engine + ': mean confidence over 85%', r.confidence > 85, Math.round(r.confidence || 0) + '%');
-    const flat = (r.text || '').replace(/\s+/g, ' ').toLowerCase();
-    LINES.forEach((l) => {
-      const want = l.replace(/\s+/g, ' ').toLowerCase();
-      ok(engine + ': read "' + l.slice(0, 28) + (l.length > 28 ? '…' : '') + '"', flat.indexOf(want) >= 0);
+  let res;
+  try {
+    res = await OCR.recognize(processed, {
+      lang: 'eng', psm: 6,
+      onProgress: (s, p) => {
+        document.getElementById('summary').textContent = s + ' ' + Math.round(p * 100) + '%';
+      }
     });
-    ok(engine + ': word boxes returned', r.words.length >= 15, r.words.length + ' words');
-    const inBounds = r.words.every((w) =>
-      w.x0 >= -2 && w.y0 >= -2 && w.x1 <= processed.width + 4 && w.y1 <= processed.height + 4 &&
-      w.x1 > w.x0 && w.y1 > w.y0);
-    ok(engine + ': word boxes lie inside the image', inBounds);
+  } catch (e) {
+    ok('recognition completed', false, e && e.message);
+    done();
+    return;
   }
 
-  document.getElementById('text').textContent =
-    Object.keys(texts).map((k) => '── ' + k + ' ──\n' + texts[k]).join('\n\n') || '(nothing)';
-  if (!res) { done(); return; }
+  document.getElementById('text').textContent = res.text || '(nothing)';
+  ok('recognition completed', !!res);
+  ok('mean confidence over 85%', res.confidence > 85, Math.round(res.confidence || 0) + '%');
+
+  const flat = (res.text || '').replace(/\s+/g, ' ').toLowerCase();
+  LINES.forEach((l) => {
+    const want = l.replace(/\s+/g, ' ').toLowerCase();
+    ok('read: "' + l.slice(0, 34) + (l.length > 34 ? '…' : '') + '"', flat.indexOf(want) >= 0);
+  });
+
+  ok('word boxes returned', res.words.length >= 15, res.words.length + ' words');
+  const inBounds = res.words.every((w) =>
+    w.x0 >= 0 && w.y0 >= 0 && w.x1 <= processed.width + 2 && w.y1 <= processed.height + 2 && w.x1 > w.x0 && w.y1 > w.y0);
+  ok('word boxes lie inside the image', inBounds);
 
   // Build the searchable PDF exactly as the Export tab does.
   try {
@@ -147,7 +134,7 @@ worker, and the PDF text layer. Takes 10–30 s on first run while the WASM core
     ok('searchable PDF built', false, e && e.message);
   }
 
-  await OCR.cancelAll();
+  await OCR.cancel();
   done();
 })();
 </script>

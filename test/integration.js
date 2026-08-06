@@ -45,9 +45,16 @@ async function newTab(url) {
   return r.json();
 }
 
+const PROFILE = path.join(os.tmpdir(), 'ohs-int-profile');
+
 (async () => {
+  // Start from a clean profile. The app restores its last session from
+  // IndexedDB, so a reused profile silently carries pages between runs and the
+  // first assertion fails in a way that looks like a code regression.
+  fs.rmSync(PROFILE, { recursive: true, force: true });
+
   const chrome = spawn(CHROME, ['--headless=new', '--disable-gpu', '--no-sandbox',
-    '--remote-debugging-port=9333', '--user-data-dir=' + path.join(os.tmpdir(), 'ohs-int-profile'),
+    '--remote-debugging-port=9333', '--user-data-dir=' + PROFILE,
     '--window-size=1500,950', 'about:blank'], { stdio: 'ignore' });
 
   const finish = (code) => { chrome.kill(); process.exit(code); };
@@ -158,70 +165,39 @@ async function newTab(url) {
   for (let i = 0; i < 30 && dims === '—'; i++) { await sleep(300); dims = await c.evaluate("document.getElementById('estDims').textContent"); }
   ok('full-resolution export measured', /\d+×\d+/.test(dims), dims + ' · ' + await c.evaluate("document.getElementById('estSize').textContent"));
 
-  // ── crop editing ──
-  await c.evaluate("document.querySelector('.tab[data-tab=\"adjust\"]').click();" +
-                   "document.getElementById('cropReset').click()");
-  await sleep(700);
-  ok('“Whole frame” clears the crop',
-     (await c.evaluate('ScannerApp.state.pages[0].corners')) === null &&
-     /whole frame/.test(await c.evaluate("document.getElementById('cropState').textContent")));
-
-  await c.evaluate("document.getElementById('cropDetect').click()");
-  await sleep(1200);
-  ok('“Auto-detect” restores a crop',
-     !!(await c.evaluate('ScannerApp.state.pages[0].corners')),
-     await c.evaluate("document.getElementById('cropState').textContent"));
-
-  // the trim slider must shrink the rendered page without touching the stored quad
-  const beforeTrim = await stage();
-  const storedBefore = await c.evaluate('JSON.stringify(ScannerApp.state.pages[0].corners)');
-  await c.evaluate("(function(){var i=document.querySelector('[data-pane=\"adjust\"] .ctl[data-k=\"inset\"] input');" +
-                   "i.value=4;i.dispatchEvent(new Event('input'));})()");
-  await sleep(900);
-  const afterTrim = await stage();
-  ok('trim shrinks the crop', afterTrim.w < beforeTrim.w && afterTrim.h < beforeTrim.h,
-     beforeTrim.w + '×' + beforeTrim.h + ' → ' + afterTrim.w + '×' + afterTrim.h);
-  ok('trim leaves the stored corners alone',
-     (await c.evaluate('JSON.stringify(ScannerApp.state.pages[0].corners)')) === storedBefore);
-  ok('trim is not treated as a filter change',
-     (await c.evaluate("ScannerApp.state.pages[0].adjust.filter")) !== 'custom');
-  await c.evaluate("(function(){var i=document.querySelector('[data-pane=\"adjust\"] .ctl[data-k=\"inset\"] input');" +
-                   "i.value=0;i.dispatchEvent(new Event('input'));})()");
-  await sleep(600);
-
-  // ── capture quality: rendering must come from the pristine frame ──
-  const psnr = await c.evaluate(`(async function(){
-    // a page with hard edges, where JPEG damage would be obvious
-    var W=900,H=640,cv=U.canvas(W,H),g=Imaging.ctx2d(cv);
-    g.fillStyle='#fff';g.fillRect(0,0,W,H);
-    g.fillStyle='#000';g.font='bold 30px Helvetica, Arial, sans-serif';
-    for(var i=0;i<12;i++) g.fillText('Sharp edges 0123456789 |||||||',40,60+i*46);
-    g.fillStyle='#c00';g.fillRect(600,420,240,160);
-    var page=await ScannerApp.addCanvas(cv,{quad:null,inheritAdjust:false});
-    await new Promise(function(r){setTimeout(r,900);});
-    // reference: same pipeline, straight off the canvas we handed in
-    var ref=Imaging.pipeline(cv,page.adjust,ScannerApp.cornersFor(page),1400);
-    var got=Imaging.pipeline(await ScannerApp.sourceFor(page),page.adjust,ScannerApp.cornersFor(page),1400);
-    if(ref.width!==got.width||ref.height!==got.height) return -1;
-    var a=Imaging.ctx2d(ref).getImageData(0,0,ref.width,ref.height).data;
-    var b=Imaging.ctx2d(got).getImageData(0,0,got.width,got.height).data;
-    var se=0,n=0;
-    for(var p=0;p<a.length;p+=4){var d=a[p]-b[p];se+=d*d;n++;}
-    var mse=se/n;
-    return mse===0?99:10*Math.log10(255*255/mse);
-  })()`);
-  ok('capture is rendered from the pristine frame, not a JPEG of it', psnr > 45,
-     psnr < 0 ? 'size mismatch' : psnr.toFixed(1) + ' dB vs the original canvas');
-
-  await c.evaluate("ScannerApp.state.pages.length>1 && document.querySelectorAll('.thumb .del')[1].click()");
-  await sleep(500);
-
   // delete the page
   await c.evaluate("document.querySelector('.thumb .del').click()");
   await sleep(600);
   ok('page deleted and stage cleared',
      (await c.evaluate('ScannerApp.state.pages.length')) === 0 &&
      (await c.evaluate("document.getElementById('viewport').classList.contains('hidden')")));
+
+  /* What the live view shows is what gets cropped. Capture hands addPage the
+     outline that was on screen — including "there wasn't one" — and addPage
+     must not run its own detection over the top of that decision. Without this
+     the preview and the captured page can disagree, which is the hard kind of
+     bug to notice: the shot looks fine until you check it against what you saw. */
+  const wysiwyg = await c.evaluate(`(async function(){
+    function scene(){                       // a page detection will certainly find
+      var W=800,H=600,cv=U.canvas(W,H),g=Imaging.ctx2d(cv);
+      g.fillStyle='#1a1c20';g.fillRect(0,0,W,H);
+      g.save();g.translate(W/2,H/2);g.rotate(0.09);
+      g.fillStyle='#f6f5f1';g.fillRect(-250,-190,500,380);
+      g.fillStyle='#222';g.font='20px Helvetica, Arial, sans-serif';
+      for(var i=0;i<8;i++) g.fillText('a line of text on the page',-210,-140+i*40);
+      g.restore();return cv;
+    }
+    var auto = await ScannerApp.addCanvas(scene(), {inheritAdjust:false});
+    var told = await ScannerApp.addCanvas(scene(), {inheritAdjust:false, quad:null});
+    var res = { detects: !!auto.corners, honoursNull: told.corners === null };
+    // leave the tray as we found it
+    ScannerApp.state.pages.length = 0;
+    ScannerApp.state.current = -1;
+    return JSON.stringify(res);
+  })()`);
+  const wy = JSON.parse(wysiwyg);
+  ok('a page with no stated crop is auto-detected', wy.detects);
+  ok('an explicit "no crop" is honoured, not re-detected', wy.honoursNull);
 
   ok('no uncaught exceptions during the run', errors.length === 0, errors.join(' | ').slice(0, 200));
 

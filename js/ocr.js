@@ -92,40 +92,11 @@
     return out;
   }
 
-  /* ── engines ────────────────────────────────────────────────── */
-
-  O.ENGINES = [
-    { id: 'paddle', label: 'PaddleOCR — PP-OCRv4' },
-    { id: 'tesseract', label: 'Tesseract' }
-  ];
-
-  O.engineAvailable = (id) =>
-    id === 'paddle' ? (typeof global.Paddle !== 'undefined' && global.Paddle.available())
-                    : O.available();
-
   /**
    * @param {HTMLCanvasElement} canvas  the PROCESSED page image
-   * @param {Object} opts { engine, lang, psm, onProgress(status, 0..1) }
+   * @param {Object} opts { lang, psm, onProgress(status, 0..1) }
    * @returns {Promise<{text, confidence, words}>}
    */
-  O.run = function (canvas, opts) {
-    opts = opts || {};
-    if (opts.engine === 'paddle') {
-      if (!O.engineAvailable('paddle')) {
-        throw new Error('PaddleOCR did not load — check vendor/onnx/ and vendor/paddle/');
-      }
-      return global.Paddle.recognize(canvas, opts);
-    }
-    return O.recognize(canvas, opts);
-  };
-
-  O.cancelAll = async function () {
-    if (typeof global.Paddle !== 'undefined') global.Paddle.cancel();
-    await O.cancel();
-  };
-
-  /* ── Tesseract ──────────────────────────────────────────────── */
-
   O.recognize = async function (canvas, opts) {
     if (!O.available()) throw new Error('OCR engine did not load — check vendor/tesseract/');
     opts = opts || {};

@@ -2,8 +2,7 @@
 
 A browser app for an overhead document camera: capture, deskew, clean up, OCR, and export
 to searchable PDF. Everything runs locally — no uploads, no build step, no network at
-runtime. Both OCR engines — PaddleOCR (PP-OCRv4) and Tesseract — are vendored in `vendor/`
-along with their models.
+runtime. Tesseract and the English language data are vendored in `vendor/`.
 
 Full spec in [REQUIREMENTS.md](REQUIREMENTS.md).
 
@@ -54,32 +53,16 @@ the filter's value.
 
 - **Light from two sides** if you can. One lamp leaves a gradient that *Shadow & gradient
   removal* then has to undo, and undoing it costs you some tonal range.
-- **Any desk that isn't the colour of paper** makes edge detection close to perfect: a dark
-  mat is ideal, but wood, a coloured mat, or a plain pale surface all work. White paper on a
-  white desk is the one genuinely hard case — there the only cue is the shadow the paper
-  casts, so keep the light a little off-axis rather than straight down.
+- **A dark, matte desk mat** makes edge detection close to perfect. Detection works from the
+  brightness difference between the page and what surrounds it, so the bigger that
+  difference, the better. A pale or paper-coloured desk is the hard case.
 - **Raise the exposure** (<kbd>.</kbd>) before blaming detection. An under-exposed frame
   crushes the paper/desk difference that everything downstream relies on.
 - **Glossy pages**: raise the camera and tilt the lamp, rather than fighting the reflection
   in software.
-- If the page isn't found, press **Detect** again, or edit the crop by hand — see below.
-  When nothing is found the status bar says so and the full frame is kept; it never guesses.
-
-## Editing the crop
-
-The **Crop** section at the top of the Adjust tab (or the **Corners** button above the
-image, or <kbd>C</kbd>) puts the stage into crop mode, showing the uncropped frame with the
-current quadrilateral over it:
-
-- **Drag a corner** to move it. A magnifier follows the pointer so you can land exactly on
-  the paper edge.
-- **Drag an edge** to slide that whole side without changing its angle — usually what you
-  want, since detection tends to get the page's angle right and one edge slightly wrong.
-- **Arrow keys** nudge the last corner you touched by a pixel; hold <kbd>Shift</kbd> for ten.
-- **Trim edges** shrinks the crop by a percentage on all sides. Use it to shave off a paper
-  shadow or a sliver of desk without moving anything by hand — it's reversible and leaves
-  the stored corners untouched.
-- **Whole frame** clears the crop; **Auto-detect** runs detection again at full resolution.
+- If the page isn't found, the status bar under the image says so and the whole frame is
+  captured — it never guesses. Press **Corners** (or <kbd>C</kbd>) and drag the four handles;
+  a magnifier follows your finger so you can land exactly on the paper edge.
 
 ## Keyboard
 
@@ -89,32 +72,11 @@ detect · <kbd>B</kbd> hold to compare · <kbd>L</kbd>/<kbd>E</kbd> live/edit ·
 filters · <kbd>R</kbd> OCR this page · <kbd>,</kbd><kbd>.</kbd> camera exposure ·
 <kbd>0</kbd> fit · <kbd>?</kbd> help
 
-In crop mode the arrow keys nudge the last corner you touched instead of changing page.
-
 ---
-
-## OCR engines
-
-**PaddleOCR (PP-OCRv4)** is the default and is usually the more accurate of the two on
-photographed pages. It is the standard two-stage PaddleOCR pipeline: a DBNet detector
-produces a text-probability map, whose blobs are binarised, reduced to minimum-area
-rectangles and expanded ("unclipped"), and each resulting line is warped flat and read by a
-CRNN with greedy CTC decoding. Character timesteps are kept, so word boxes come out of the
-CTC alignment rather than being guessed from the line — which is what makes the searchable
-PDF's text layer line up. The models are vendored (~26 MB, loaded on first use and then
-held in memory) and it runs single-threaded, because a plain local server can't send the
-COOP/COEP headers WASM threads need.
-
-**Tesseract** starts faster and uses less memory. It is the better choice for a quick read,
-or if you need a language PaddleOCR's bundled character set doesn't cover.
-
-The engine's own defaults are used for layout; the *Language* and *Page segmentation*
-controls apply to Tesseract only and hide themselves when PaddleOCR is selected.
 
 ## Other languages
 
-PaddleOCR's bundled character set covers Latin text and Chinese. For Tesseract, only English
-is bundled. Pick another language in the OCR tab and it will be fetched from
+Only English is bundled. Pick another language in the OCR tab and it will be fetched from
 the CDN once (needs network, then it's cached by the browser). To make one permanent and
 offline, drop its `.traineddata.gz` into `vendor/tessdata/` and add its code to
 `O.BUNDLED` in `js/ocr.js`:
@@ -135,12 +97,11 @@ js/util.js            helpers — toasts, downloads, canvas, beep
 js/geometry.js        page detection, homography, perspective warp
 js/imaging.js         the processing pipeline: flattening, tone, filters, threshold
 js/camera.js          device enumeration, streaming, capture, motion detection
-js/ocr.js             engine dispatch + the Tesseract wrapper
-js/paddle.js          PP-OCRv4: DB detection post-processing, CTC decoding
+js/ocr.js             Tesseract wrapper, pointed at vendor/
 js/pdf.js             PDF writer with an invisible OCR text layer
 js/store.js           IndexedDB session persistence
 js/app.js             UI controller
-vendor/               Tesseract, onnxruntime-web and the PP-OCRv4 models (all offline)
+vendor/               Tesseract runtime + eng traineddata (offline)
 test/                 see below
 ```
 
@@ -154,17 +115,9 @@ temperature/tint → tone curve → saturation/vibrance → denoise → sharpen 
 filter mode (grey / adaptive threshold) → invert
 ```
 
-The same function renders the preview and the export; only the input scale differs, so what
-you see is what you get. The preview runs in two tiers: 1400 px on the long edge while a
-control is being dragged, then a settled pass at the display's own pixel count once you stop
-(up to 3200 px). Rendering at one fixed size and letting the browser scale it to fit is what
-made a capture look softer on screen than the live view it came from. OCR gets 2400 px;
-export is uncapped.
-
-Nothing is rendered from a re-decoded JPEG. The capture canvas itself is kept in memory for
-the pages you are working on, and the stored JPEG exists only so a reload can recover the
-session — encoding and immediately decoding again cost a visible generation of quality on
-exactly the sharp glyph edges a scanner is for (~42 dB PSNR after the sharpen stage).
+The same function renders the preview and the export; only the input scale differs, so
+what you see is what you get. Preview caps at 1500 px on the long edge (≈11–42 ms per
+update), OCR at 2400 px, export is uncapped.
 
 Two pieces are worth knowing about if you touch the code:
 
@@ -173,23 +126,29 @@ Two pieces are worth knowing about if you touch the code:
   definition low-frequency, and divides. Strength interpolates the gain geometrically
   (`gain^s`), not the output — blending the output linearly leaves a residual gradient
   proportional to `1−s`, so half strength would still show the lamp.
-- **Page detection** is not one algorithm but several, scored against each other. A page can
-  be brighter than the desk, darker than it, or the same brightness in a different colour,
-  and no single segmentation covers all three. Four cheap ones run — luminance either
-  polarity, distance from the desk colour, and distance from it in illumination-invariant
-  chromaticity — each proposing a quadrilateral. Every candidate is then *refined* against
-  the image gradient (walk each edge, look sideways for the true paper boundary, fit a line,
-  intersect the four), which is what turns a rough mask into an accurate crop: segmentation
-  only has to land within a few pixels. The winner is whichever quad's edges actually sit on
-  real image edges, with paper on one side and desk on the other, all the way round, on all
-  four sides. If nothing convinces, it returns `null` and the full frame stands — a wrong
-  crop is worse than no crop.
+- **Page detection** thresholds the frame with Otsu, dilates to close the gaps that lines of
+  text cut through the paper, takes the largest connected component, and reduces its convex
+  hull to four corners. It returns `null` rather than guessing when the region doesn't stand
+  out from its surroundings — a blank desk should produce no crop, not a random one.
 
-  Two details do most of the work. Support alone can't identify a page, because a line of
-  type and a wood grain line are also long, straight and strongly gradient; what separates a
-  page boundary is that the material differs across it. And the interior is probed at two
-  depths, because a text band *does* give a strong, perfectly consistent step — ink inside,
-  paper outside — and only gives itself away a little deeper in, where the paper returns.
+  Four things there matter more than the algorithm itself:
+
+  - **Both threshold polarities are tried.** The page-is-brighter-than-the-desk guess is
+    wrong often enough in ordinary use — a page that nearly fills the frame leaves a border
+    ring that is itself mostly paper, a hand resting in the middle drags the centre down —
+    and guessing wrong meant no outline at all.
+  - **The region must fill its own outline.** On a desk close to paper colour the paper-side
+    threshold takes in the desk too and gets rejected, so the ink-side attempt wins and its
+    hull is the *text block* — a plausible-looking quadrilateral sitting well inside the real
+    page. Ink covers a small fraction of its own bounding box; paper fills nearly all of its
+    own outline. A quad covering more than 95% of the frame is refused for the same reason:
+    cropping to everything is not a crop.
+  - **The live outline is what gets cropped.** Capture hands the displayed quadrilateral to
+    the page, including "there wasn't one", rather than running a second detection that can
+    quietly disagree with what you were looking at.
+  - **The outline is eased, not snapped.** Each reading is blended towards the last, with a
+    snap when the page genuinely moves and a few frames of hold on a miss, so it stops
+    flickering between readings.
 
 ---
 
@@ -241,8 +200,6 @@ a different browser binary.
   page, or use a glass platen.
 - The camera's own controls (zoom, focus, exposure) appear only if the browser exposes
   them; many UVC cameras expose nothing, in which case use their driver utility.
-- What you see and what you export are rendered from the pristine sensor frame, which is
-  held in memory for the few pages you are working on. Session restore falls back to a
-  JPEG (q0.96), so a page recovered after a reload is one generation from the sensor —
-  export before closing if that matters.
+- Pages are held as JPEG (q0.94), so an edited page is one generation from the sensor.
+  Export before you close if that matters.
 - Chrome supports "Copy image"; Safari and Firefox may refuse the clipboard write.

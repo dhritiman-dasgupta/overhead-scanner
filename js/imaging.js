@@ -26,7 +26,7 @@
     denoise: 0, sharpen: 30,
     threshold: 0, window: 100,
     invert: false,
-    rotate: 0, flipH: false, flipV: false, straighten: 0, inset: 0,
+    rotate: 0, flipH: false, flipV: false, straighten: 0,
     outSize: 'detected'
   };
 
@@ -51,8 +51,7 @@
     Object.assign(adjust, I.DEFAULTS, preset, {
       filter: name,
       rotate: adjust.rotate, flipH: adjust.flipH, flipV: adjust.flipV,
-      straighten: adjust.straighten, outSize: adjust.outSize, invert: adjust.invert,
-      inset: adjust.inset
+      straighten: adjust.straighten, outSize: adjust.outSize, invert: adjust.invert
     });
     return adjust;
   };

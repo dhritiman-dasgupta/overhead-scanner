@@ -220,22 +220,6 @@
         </section>
 
         <section class="grp">
-          <h3>Crop</h3>
-          <button class="btn btn-toggle wide" id="cropEdit">Edit crop corners</button>
-          <div class="btn-row">
-            <button class="btn btn-ghost" id="cropDetect">Auto-detect</button>
-            <button class="btn btn-ghost" id="cropReset">Whole frame</button>
-          </div>
-          <div class="ctl" data-k="inset">
-            <label>Trim edges <output>0.0</output>%</label>
-            <input type="range" min="-3" max="8" step="0.1" value="0">
-          </div>
-          <div class="kv"><span>Status</span><b id="cropState">—</b></div>
-          <p class="note">In crop mode, drag a corner to move it, or drag an edge to move the
-            whole side. Arrow keys nudge the last corner you touched; hold Shift for bigger steps.</p>
-        </section>
-
-        <section class="grp">
           <h3>Geometry</h3>
           <div class="btn-row">
             <button class="btn btn-ghost" id="rotL" title="Rotate left ([)"><svg class="ico" viewBox="0 0 24 24"><path d="M13 4.07V1L8.45 5.55 13 10V6.09c2.84.48 5 2.94 5 5.91s-2.16 5.43-5 5.91v2.02c3.95-.49 7-3.85 7-7.93s-3.05-7.44-7-7.93zM7.11 8.53L5.7 7.11C4.8 8.27 4.24 9.61 4.07 11h2.02c.14-.87.49-1.72 1.02-2.47zM6.09 13H4.07c.17 1.39.72 2.73 1.62 3.89l1.41-1.42c-.52-.75-.87-1.59-1.01-2.47zm1.01 5.32c1.16.9 2.51 1.44 3.9 1.61V17.9c-.87-.15-1.71-.49-2.46-1.03L7.1 18.32z"/></svg>90°</button>
@@ -358,13 +342,6 @@
         <section class="grp">
           <h3>Recognition</h3>
           <label class="field wide">
-            <span>Engine</span>
-            <select id="ocrEngine">
-              <option value="paddle">PaddleOCR — PP-OCRv4 (accurate)</option>
-              <option value="tesseract">Tesseract — faster to start</option>
-            </select>
-          </label>
-          <label class="field wide" id="langRow">
             <span>Language</span>
             <select id="ocrLang"><option value="eng">English (eng)</option></select>
           </label>
@@ -386,7 +363,6 @@
           <div class="prog"><i id="ocrFill"></i></div>
           <div class="kv"><span id="ocrStatus">idle</span><b id="ocrConf">—</b></div>
           <label class="row-check"><input type="checkbox" id="showBoxes"><span>Show word boxes on the image</span></label>
-          <p class="note" id="engineNote"></p>
           <p class="note">OCR runs on the <em>processed</em> image — a good Black &amp; white or Auto filter usually lifts accuracy more than any OCR setting.</p>
         </section>
 
@@ -502,8 +478,6 @@
 <script src="js/pdf.js"></script>
 <script src="js/store.js"></script>
 <script src="vendor/tesseract/tesseract.min.js"></script>
-<script src="vendor/onnx/ort.wasm.min.js"></script>
-<script src="js/paddle.js"></script>
 <script src="js/ocr.js"></script>
 <script src="js/app.js"></script>
 </body>

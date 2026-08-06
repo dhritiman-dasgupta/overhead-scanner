@@ -3,10 +3,8 @@
   'use strict';
 
   const $ = U.$, $$ = U.$$;
-  const PREVIEW_FAST = 1400;   // long edge while a control is being dragged
-  const PREVIEW_MAX = 3200;    // ceiling for the settled, display-resolution pass
-  const FULL_CACHE = 3;        // pristine full-resolution frames held in memory
-  const OCR_MAX = 2400;        // long edge fed to the OCR engine
+  const PREVIEW_MAX = 1500;    // long edge used for live preview processing
+  const OCR_MAX = 2400;        // long edge fed to Tesseract — more is slower, not better
   const THUMB_W = 160;
 
   /* ── element refs ───────────────────────────────────────────── */
@@ -30,12 +28,9 @@
     guideGrid: $('#guideGrid'), guideCross: $('#guideCross'), guideDetect: $('#guideDetect'),
     mirrorChk: $('#mirrorChk'), guideAspect: $('#guideAspect'),
     autoDetectChk: $('#autoDetectChk'), autoSelectChk: $('#autoSelectChk'),
-    cropEdit: $('#cropEdit'), cropDetect: $('#cropDetect'), cropReset: $('#cropReset'),
-    cropState: $('#cropState'),
     filters: $('#filters'), wbSel: $('#wbSel'), invertChk: $('#invertChk'), outSize: $('#outSize'),
     rotL: $('#rotL'), rotR: $('#rotR'), flipH: $('#flipH'), flipV: $('#flipV'),
     btnResetAdjust: $('#btnResetAdjust'), btnApplyAll: $('#btnApplyAll'),
-    ocrEngine: $('#ocrEngine'), langRow: $('#langRow'), engineNote: $('#engineNote'),
     ocrLang: $('#ocrLang'), ocrPsm: $('#ocrPsm'), btnOcrPage: $('#btnOcrPage'), btnOcrAll: $('#btnOcrAll'),
     btnOcrCancel: $('#btnOcrCancel'), ocrFill: $('#ocrFill'), ocrStatus: $('#ocrStatus'), ocrConf: $('#ocrConf'),
     ocrText: $('#ocrText'), showBoxes: $('#showBoxes'), btnCopyText: $('#btnCopyText'), btnSaveText: $('#btnSaveText'),
@@ -56,10 +51,6 @@
     zoom: 0,                  // 0 = fit to window
     liveQuad: null,
     dragCorner: -1,
-    dragEdge: -1,
-    dragBase: null,
-    dragFrom: null,
-    lastCorner: 0,
     dragPos: null,
     settings: {
       device: '', res: 'auto',
@@ -68,20 +59,12 @@
       autoCap: false, interval_on: false, beep: true,
       grid: false, cross: false, liveDetect: true, mirror: false, aspect: '',
       autoDetect: true, autoSelect: true,
-      engine: 'paddle', lang: 'eng', psm: '3', format: 'image/jpeg',
+      lang: 'eng', psm: '3', format: 'image/jpeg',
       pdfSize: 'a4', searchable: true, allPages: true, showBoxes: false
     }
   };
 
   const cur = () => (state.current >= 0 ? state.pages[state.current] : null);
-
-  /**
-   * The crop actually used for rendering: the stored quad with the trim
-   * percentage applied. The stored quad stays untouched so the trim slider
-   * remains reversible and corner dragging still edits the real edges.
-   */
-  const cornersOf = (page) =>
-    (page && page.corners) ? Geom.inset(page.corners, page.adjust.inset || 0) : null;
 
   /* ── bitmap caches ──────────────────────────────────────────── */
   const fullCache = new Map();     // id -> canvas (full resolution)
@@ -116,51 +99,35 @@
       fullCache.delete(page.id); fullCache.set(page.id, c);
       return c;
     }
-    // Only reached once the pristine frame has been evicted, or after a reload.
     const bmp = await decode(page.blob);
     const c = U.canvas(bmp.width, bmp.height);
     Imaging.ctx2d(c).drawImage(bmp, 0, 0);
     if (bmp.close) bmp.close();
     fullCache.set(page.id, c);
-    lru(fullCache, FULL_CACHE);
+    lru(fullCache, 2);
     return c;
   }
 
-  /**
-   * A copy of the source scaled to `maxDim`, cached per page and tier. Two
-   * tiers exist: a small one that keeps the sliders responsive, and one at
-   * display resolution for the settled view.
-   */
-  async function getSource(page, maxDim) {
-    const tier = maxDim <= PREVIEW_FAST ? 'f' : 'h';
-    const key = page.id + ':' + tier;
-    const hit = prevCache.get(key);
-    if (hit && (tier === 'f' || hit.maxDim >= maxDim - 2)) {
-      prevCache.delete(key); prevCache.set(key, hit);
-      return hit.canvas;
+  async function getPreviewCanvas(page) {
+    if (prevCache.has(page.id)) {
+      const c = prevCache.get(page.id);
+      prevCache.delete(page.id); prevCache.set(page.id, c);
+      return c;
     }
     const full = await getFullCanvas(page);
-    const canvas = Imaging.fit(full, maxDim);
-    prevCache.set(key, { canvas, maxDim });
-    lru(prevCache, 6);
-    return canvas;
+    const c = Imaging.fit(full, PREVIEW_MAX);
+    prevCache.set(page.id, c);
+    lru(prevCache, 8);
+    return c;
   }
 
-  function dropCaches(id) {
-    fullCache.delete(id);
-    prevCache.delete(id + ':f');
-    prevCache.delete(id + ':h');
-  }
+  function dropCaches(id) { fullCache.delete(id); prevCache.delete(id); }
 
   /* ── page creation ──────────────────────────────────────────── */
 
   async function addPage(canvas, opts) {
     opts = opts || {};
-    // The JPEG exists only so the session survives a reload. Everything you
-    // see and everything you export is rendered from the pristine frame held
-    // below in fullCache — encoding first and decoding straight back was
-    // costing a visible generation of quality before the page was even shown.
-    const blob = await U.canvasToBlob(canvas, 'image/jpeg', 0.96);
+    const blob = await U.canvasToBlob(canvas, 'image/jpeg', 0.94);
     const page = {
       id: U.uid(),
       blob: blob,
@@ -175,15 +142,17 @@
     };
 
     if (state.settings.autoDetect) {
-      // 'quad' present means the caller already ran detection (and null is a
-      // real answer — don't quietly run it a second time).
+      // A 'quad' key means the caller already decided — and null is a real
+      // decision, not "please look again". Capture relies on that: it crops to
+      // the outline that was on screen, so a second, independent detection
+      // can't quietly disagree with what you were looking at.
       const q = ('quad' in opts) ? opts.quad : Geom.detect(canvas);
       if (q) page.corners = q;
     }
 
     state.pages.push(page);
-    fullCache.set(page.id, canvas);          // keep the sensor frame itself
-    lru(fullCache, FULL_CACHE);
+    prevCache.set(page.id, Imaging.fit(canvas, PREVIEW_MAX));
+    lru(prevCache, 8);
 
     renderTray();
     persistPage(page);
@@ -213,7 +182,6 @@
     if (switchToEdit) setMode('edit');
     syncAdjustUI();
     syncOcrUI();
-    syncCropUI();
     renderTray();
     renderStage();
   }
@@ -288,8 +256,8 @@
 
   async function refreshThumb(page) {
     try {
-      const src = await getSource(page, PREVIEW_FAST);
-      const out = Imaging.pipeline(src, page.adjust, cornersOf(page), 420);
+      const src = await getPreviewCanvas(page);
+      const out = Imaging.pipeline(src, page.adjust, page.corners, 420);
       const th = Imaging.fit(out, THUMB_W);
       page.thumb = th.toDataURL('image/jpeg', 0.7);
       const node = el.tray.querySelector('.thumb[data-idx="' + state.pages.indexOf(page) + '"] img');
@@ -329,21 +297,7 @@
 
   const renderStage = U.rafThrottle(function () { renderStageNow(); });
 
-  /** How many pixels the stage can actually show, so we render exactly that. */
-  function stagePixels() {
-    const box = el.stageView.getBoundingClientRect();
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    const want = Math.round(Math.max(box.width, box.height) * dpr * 1.1);
-    return U.clamp(want, PREVIEW_FAST, PREVIEW_MAX);
-  }
-
-  let hiResTimer = 0;
-  function scheduleHiRes() {
-    clearTimeout(hiResTimer);
-    hiResTimer = setTimeout(() => { renderStageNow(true); }, 200);
-  }
-
-  async function renderStageNow(hiRes) {
+  async function renderStageNow() {
     const live = state.mode === 'live';
     const page = cur();
     const hasSomething = live ? Camera.running() : !!page;
@@ -365,35 +319,28 @@
       natH = el.video.videoHeight || 720;
       const st = Camera.settings();
       el.stageInfo.textContent = st ? (st.width + '×' + st.height + (st.frameRate ? ' · ' + st.frameRate + ' fps' : '')) : '—';
-      // the live-detection loop owns this line while the camera is running
       if (!Camera.running()) el.stageHint.textContent = '';
     } else {
-      // Two-tier: a small fast pass keeps the sliders live, then a settled pass
-      // at the display's own pixel count. Rendering at a fixed size and letting
-      // the browser scale it up is what made a capture look softer than the
-      // live view it came from.
-      const cap = hiRes ? stagePixels() : PREVIEW_FAST;
-      const src = await getSource(page, cap);
+      const src = await getPreviewCanvas(page);
       const adj = state.compare ? neutralAdjust(page.adjust) : page.adjust;
       const out = state.cornerMode
         ? copyOf(src)
-        : Imaging.pipeline(src, adj, cornersOf(page), cap);
+        : Imaging.pipeline(src, adj, page.corners, PREVIEW_MAX);
       lastProcessed = out;
       el.stageCanvas.width = out.width;
       el.stageCanvas.height = out.height;
       Imaging.ctx2d(el.stageCanvas).drawImage(out, 0, 0);
       natW = out.width; natH = out.height;
 
-      const full = Imaging.targetSize(page.adjust, cornersOf(page), page.w, page.h, Infinity);
+      const full = Imaging.targetSize(page.adjust, page.corners, page.w, page.h, Infinity);
       el.stageInfo.textContent =
         'page ' + (state.current + 1) + '/' + state.pages.length +
         ' · source ' + page.w + '×' + page.h +
         ' · output ' + full.w + '×' + full.h +
         (page.corners ? ' · cropped' : '');
       el.stageHint.textContent = state.cornerMode
-        ? 'drag a corner, or an edge to move the whole side — D re-detects, C when done'
+        ? 'drag the corners — D re-detects, C when done'
         : (state.compare ? 'showing original' : '');
-      if (!hiRes) scheduleHiRes();
     }
 
     layoutViewport(natW, natH);
@@ -519,8 +466,7 @@
 
   /** Magnified inset while dragging a corner, so you can land on the edge. */
   function drawLoupe(c, W, H) {
-    const entry = prevCache.get(cur().id + ':h') || prevCache.get(cur().id + ':f');
-    const src = entry && entry.canvas;
+    const src = prevCache.get(cur().id);
     if (!src) return;
     const R = 62, Z = 3.2;
     const nx = state.dragPos.x, ny = state.dragPos.y;
@@ -554,93 +500,41 @@
     };
   }
 
-  /** Distance from p to segment ab, in normalised units scaled to pixels. */
-  function segDist(p, a, b, w, h) {
-    const ax = a.x * w, ay = a.y * h, bx = b.x * w, by = b.y * h;
-    const px = p.x * w, py = p.y * h;
-    const dx = bx - ax, dy = by - ay;
-    const len2 = dx * dx + dy * dy;
-    if (!len2) return Math.hypot(px - ax, py - ay);
-    let t = ((px - ax) * dx + (py - ay) * dy) / len2;
-    t = U.clamp(t, 0, 1);
-    return Math.hypot(px - (ax + dx * t), py - (ay + dy * t));
-  }
-
   el.overlay.addEventListener('pointerdown', (ev) => {
     if (state.mode !== 'edit' || !state.cornerMode || !cur()) return;
     const page = cur();
     if (!page.corners) page.corners = Geom.fullFrame();
     const p = overlayPos(ev);
     const r = el.overlay.getBoundingClientRect();
-
-    // corners win over edges — they sit on top of them
-    let best = -1, bestD = 24;
+    let best = -1, bestD = 26 / Math.max(r.width, 1);
     page.corners.forEach((q, i) => {
-      const d = Math.hypot((q.x - p.x) * r.width, (q.y - p.y) * r.height);
+      const d = Math.hypot((q.x - p.x) * r.width, (q.y - p.y) * r.height) / r.width;
       if (d < bestD) { bestD = d; best = i; }
     });
-    if (best >= 0) {
-      state.dragCorner = best; state.dragEdge = -1;
-      state.dragPos = p;
-      el.overlay.setPointerCapture(ev.pointerId);
-      renderStage();
-      return;
-    }
-
-    // Dragging a whole side is the move you want most often: detection is
-    // usually right about the page's angle and wrong by a hair about where one
-    // edge sits, and nudging two corners in step by hand is fiddly.
-    let bestEdge = -1, bestEdgeD = 18;
-    for (let i = 0; i < 4; i++) {
-      const d = segDist(p, page.corners[i], page.corners[(i + 1) % 4], r.width, r.height);
-      if (d < bestEdgeD) { bestEdgeD = d; bestEdge = i; }
-    }
-    if (bestEdge < 0) return;
-    state.dragEdge = bestEdge;
-    state.dragCorner = -1;
-    state.dragFrom = p;
-    state.dragBase = page.corners.map((q) => ({ x: q.x, y: q.y }));
+    if (best < 0) return;
+    state.dragCorner = best;
     state.dragPos = p;
     el.overlay.setPointerCapture(ev.pointerId);
     renderStage();
   });
 
   el.overlay.addEventListener('pointermove', (ev) => {
-    if (state.dragCorner < 0 && state.dragEdge < 0) return;
+    if (state.dragCorner < 0) return;
     const page = cur();
     const p = overlayPos(ev);
-
-    if (state.dragCorner >= 0) {
-      page.corners[state.dragCorner] = { x: p.x, y: p.y };
-    } else {
-      // slide the side along its own normal, leaving its angle alone
-      const i = state.dragEdge, j = (i + 1) % 4;
-      const a = state.dragBase[i], b = state.dragBase[j];
-      const r = el.overlay.getBoundingClientRect();
-      const ex = (b.x - a.x) * r.width, ey = (b.y - a.y) * r.height;
-      const len = Math.hypot(ex, ey) || 1;
-      const nx = -ey / len, ny = ex / len;
-      const mx = (p.x - state.dragFrom.x) * r.width, my = (p.y - state.dragFrom.y) * r.height;
-      const along = mx * nx + my * ny;
-      const sx = (nx * along) / r.width, sy = (ny * along) / r.height;
-      page.corners[i] = { x: U.clamp(a.x + sx, 0, 1), y: U.clamp(a.y + sy, 0, 1) };
-      page.corners[j] = { x: U.clamp(b.x + sx, 0, 1), y: U.clamp(b.y + sy, 0, 1) };
-    }
+    page.corners[state.dragCorner] = { x: p.x, y: p.y };
     state.dragPos = p;
     drawOverlay();
   });
 
   function endDrag() {
-    if (state.dragCorner < 0 && state.dragEdge < 0) return;
-    if (state.dragCorner >= 0) state.lastCorner = state.dragCorner;
+    if (state.dragCorner < 0) return;
     state.dragCorner = -1;
-    state.dragEdge = -1;
     state.dragPos = null;
     const page = cur();
     if (page && page.corners) page.corners = Geom.order(page.corners);
     persistPage(page);
     refreshThumbSoon();
-    syncCropUI();
     renderStage();
   }
   el.overlay.addEventListener('pointerup', endDrag);
@@ -683,6 +577,7 @@
         el.resInfo.textContent = st.width + '×' + st.height;
         el.fpsInfo.textContent = st.frameRate ? st.frameRate + ' fps' : '—';
       }
+      Geom.resetSticky();
       el.camStatus.textContent = 'live';
       el.camStatus.className = 'chip chip-on';
       el.btnStart.textContent = 'Stop camera';
@@ -819,26 +714,27 @@
     }
   };
 
-  /* The outline is redetected several times a second and the raw result jitters
-     by a pixel or two even on a motionless page, which reads as instability.
-     Ease towards the new quad, but snap when it genuinely moves — otherwise
-     turning a page would show the outline crawling to the new one. */
-  const liveQuad = { quad: null, miss: 0, score: 0 };
+  /* The outline is redetected a couple of times a second, and the raw result
+     shifts by a pixel or two even on a motionless page. Ease towards each new
+     reading, but snap when the page has genuinely moved — otherwise turning a
+     page would show the outline crawling across to the new one. A few missed
+     frames hold the last outline rather than blinking it away, which is what
+     made it look like it was jumping. */
+  const live = { quad: null, miss: 0 };
 
-  function updateLiveQuad(q, score) {
+  function updateLiveQuad(q) {
     if (!q) {
-      if (++liveQuad.miss > 3) { liveQuad.quad = null; liveQuad.score = 0; }
+      if (++live.miss > 3) live.quad = null;
       return;
     }
-    liveQuad.miss = 0;
-    liveQuad.score = score;
-    if (!liveQuad.quad) { liveQuad.quad = q; return; }
+    live.miss = 0;
+    if (!live.quad) { live.quad = q; return; }
     let moved = 0;
     for (let i = 0; i < 4; i++) {
-      moved = Math.max(moved, Math.hypot(q[i].x - liveQuad.quad[i].x, q[i].y - liveQuad.quad[i].y));
+      moved = Math.max(moved, Math.hypot(q[i].x - live.quad[i].x, q[i].y - live.quad[i].y));
     }
     const a = moved > 0.05 ? 1 : 0.4;
-    liveQuad.quad = liveQuad.quad.map((p, i) => ({
+    live.quad = live.quad.map((p, i) => ({
       x: p.x + (q[i].x - p.x) * a,
       y: p.y + (q[i].y - p.y) * a
     }));
@@ -846,20 +742,15 @@
 
   setInterval(() => {
     if (!Camera.running() || state.mode !== 'live') return;
-    if (!state.settings.liveDetect) { state.liveQuad = null; liveQuad.quad = null; return; }
+    if (!state.settings.liveDetect) { state.liveQuad = null; live.quad = null; return; }
     if (!el.video.videoWidth) return;
     try {
-      // Smaller and without the Hough fallback: this runs continuously, and a
-      // capture re-detects at full quality anyway.
-      const q = Geom.detect(el.video, { maxDim: 384, fast: true });
-      updateLiveQuad(q, (Geom.lastDetection && Geom.lastDetection.score) || 0);
-    } catch (e) { liveQuad.quad = null; }
-    state.liveQuad = liveQuad.quad;
-    if (state.mode === 'live') {
-      el.stageHint.textContent = state.liveQuad
-        ? 'page found' + (state.settings.autoCap ? ' · auto-capture armed' : '')
-        : (state.settings.autoCap ? 'auto-capture armed' : 'no page outline — the full frame will be used');
-    }
+      updateLiveQuad(Geom.detect(el.video, { sticky: true }));
+    } catch (e) { live.quad = null; }
+    state.liveQuad = live.quad;
+    el.stageHint.textContent = state.liveQuad
+      ? 'page found' + (state.settings.autoCap ? ' · auto-capture armed' : '')
+      : 'no page outline — the whole frame will be captured';
     drawOverlay();
   }, 420);
 
@@ -879,15 +770,7 @@
     void el.shutter.offsetWidth;
     el.shutter.classList.add('flash');
     if (state.settings.beep) U.beep(1100, 70);
-    // Re-detect on the captured frame rather than reusing the preview outline:
-    // the shot is full sensor resolution and the live pass runs deliberately
-    // small and cheap. Fall back to the preview outline if this one declines.
-    let quad = null;
-    if (state.settings.autoDetect) {
-      try { quad = Geom.detect(shot); } catch (e) { quad = null; }
-      if (!quad && state.settings.liveDetect && state.liveQuad) quad = state.liveQuad;
-    }
-    await addPage(shot, { quad: quad });
+    await addPage(shot, { quad: state.settings.liveDetect ? state.liveQuad : null });
   }
 
   el.btnCapture.addEventListener('click', capture);
@@ -936,17 +819,23 @@
   el.modeLive.addEventListener('click', () => setMode('live'));
   el.modeEdit.addEventListener('click', () => setMode('edit'));
 
-  el.btnCorners.addEventListener('click', () => toggleCornerMode());
+  el.btnCorners.addEventListener('click', () => {
+    if (!cur()) return;
+    setMode('edit');
+    state.cornerMode = !state.cornerMode;
+    el.btnCorners.classList.toggle('is-on', state.cornerMode);
+    if (!state.cornerMode) refreshThumbSoon();
+    renderStage();
+  });
 
   el.btnDetect.addEventListener('click', async () => {
     const page = cur();
     if (!page) { U.toast('No page selected'); return; }
-    const src = await getFullCanvas(page);     // full resolution: most accurate
+    const src = await getPreviewCanvas(page);
     const q = Geom.detect(src);
     if (q) { page.corners = q; U.toast('Page edges detected', 'good'); }
     else { page.corners = null; U.toast('No page edge found — using the full frame'); }
     persistPage(page);
-    syncCropUI();
     refreshThumbSoon();
     renderStage();
   });
@@ -976,13 +865,11 @@
 
   /* ── adjust pane ────────────────────────────────────────────── */
 
-  const GEOMETRY_KEYS = ['straighten', 'inset'];
-
-  const ADJUST_KEYS = ['straighten', 'inset', 'flatten', 'temp', 'tint', 'exposure', 'contrast', 'gamma',
+  const ADJUST_KEYS = ['straighten', 'flatten', 'temp', 'tint', 'exposure', 'contrast', 'gamma',
                        'highlights', 'shadows', 'saturation', 'vibrance', 'denoise', 'sharpen',
                        'threshold', 'window'];
 
-  const FMT = { gamma: (v) => v.toFixed(2), straighten: (v) => v.toFixed(1), inset: (v) => v.toFixed(1) };
+  const FMT = { gamma: (v) => v.toFixed(2), straighten: (v) => v.toFixed(1) };
 
   function ctlOf(pane, key) { return $('[data-pane="' + pane + '"] .ctl[data-k="' + key + '"]'); }
 
@@ -995,9 +882,7 @@
       if (!page) return;
       const v = parseFloat(input.value);
       page.adjust[key] = v;
-      // Geometry is not part of a look, so changing it shouldn't claim the
-      // filter has been customised.
-      if (GEOMETRY_KEYS.indexOf(key) < 0) page.adjust.filter = 'custom';
+      page.adjust.filter = 'custom';
       out.textContent = (FMT[key] || String)(v);
       markDirty(box, key, v);
       syncFilterButtons();
@@ -1089,56 +974,7 @@
     el.wbSel.value = a.wb;
     el.invertChk.checked = !!a.invert;
     el.outSize.value = a.outSize;
-    syncCropUI();
     syncFilterButtons();
-  }
-
-  /* ── crop panel ─────────────────────────────────────────────── */
-
-  function toggleCornerMode(on) {
-    if (!cur()) { U.toast('Select a page first'); return; }
-    setMode('edit');
-    state.cornerMode = on === undefined ? !state.cornerMode : !!on;
-    el.btnCorners.classList.toggle('is-on', state.cornerMode);
-    el.cropEdit.classList.toggle('is-on', state.cornerMode);
-    el.cropEdit.textContent = state.cornerMode ? 'Done editing crop' : 'Edit crop corners';
-    if (!state.cornerMode) refreshThumbSoon();
-    renderStage();
-  }
-
-  el.cropEdit.addEventListener('click', () => toggleCornerMode());
-  el.cropDetect.addEventListener('click', () => el.btnDetect.click());
-  el.cropReset.addEventListener('click', () => {
-    const p = cur();
-    if (!p) return;
-    p.corners = null;
-    persistPage(p); syncCropUI(); refreshThumbSoon(); renderStage();
-    U.toast('Crop cleared — using the whole frame');
-  });
-
-  function syncCropUI() {
-    const p = cur();
-    el.cropState.textContent = !p ? '—'
-      : (p.corners ? (Geom.isFullFrame(p.corners) ? 'whole frame' : 'cropped') : 'whole frame');
-    el.cropEdit.classList.toggle('is-on', state.cornerMode);
-    el.cropEdit.textContent = state.cornerMode ? 'Done editing crop' : 'Edit crop corners';
-  }
-
-  /** Nudge the last corner touched; the fine adjustment mouse dragging can't do. */
-  function nudgeCorner(dx, dy, big) {
-    const p = cur();
-    if (!p || !state.cornerMode) return false;
-    if (!p.corners) p.corners = Geom.fullFrame();
-    const r = el.overlay.getBoundingClientRect();
-    const step = big ? 10 : 1;
-    const i = U.clamp(state.lastCorner, 0, 3);
-    p.corners[i] = {
-      x: U.clamp(p.corners[i].x + (dx * step) / Math.max(1, r.width), 0, 1),
-      y: U.clamp(p.corners[i].y + (dy * step) / Math.max(1, r.height), 0, 1)
-    };
-    persistPageSoon(p);
-    drawOverlay();
-    return true;
   }
 
   function syncFilterButtons() {
@@ -1150,34 +986,16 @@
 
   /* ── OCR ────────────────────────────────────────────────────── */
 
-  function syncEngineUI() {
-    const paddle = el.ocrEngine.value === 'paddle';
-    // Paddle carries its own multilingual character set and does its own layout
-    // analysis, so neither of Tesseract's two controls applies to it.
-    el.langRow.style.display = paddle ? 'none' : '';
-    el.ocrPsm.parentNode.style.display = paddle ? 'none' : '';
-    el.engineNote.textContent = paddle
-      ? 'PP-OCRv4 runs locally on WebAssembly. The first run loads about 26 MB of model from vendor/ — a few seconds — then stays in memory.'
-      : 'Tesseract starts faster and is lighter, but is usually less accurate on photographed pages than PP-OCRv4.';
-    const ok = OCR.engineAvailable(el.ocrEngine.value);
-    el.btnOcrPage.disabled = el.btnOcrAll.disabled = !ok;
-    if (!ok) el.ocrStatus.textContent = 'engine not loaded';
-  }
-
   function initOcrUI() {
     el.ocrLang.innerHTML = OCR.LANGS.map(([code, name]) =>
       '<option value="' + code + '">' + name + ' (' + code + ')' +
       (OCR.BUNDLED.indexOf(code) < 0 ? ' — downloads' : '') + '</option>').join('');
     el.ocrLang.value = state.settings.lang;
     el.ocrPsm.value = state.settings.psm;
-    el.ocrEngine.value = OCR.engineAvailable(state.settings.engine) ? state.settings.engine
-                       : (OCR.engineAvailable('paddle') ? 'paddle' : 'tesseract');
-    el.ocrEngine.addEventListener('change', () => {
-      state.settings.engine = el.ocrEngine.value;
-      saveSettings();
-      syncEngineUI();
-    });
-    syncEngineUI();
+    if (!OCR.available()) {
+      el.ocrStatus.textContent = 'engine not loaded';
+      el.btnOcrPage.disabled = el.btnOcrAll.disabled = true;
+    }
   }
 
   function syncOcrUI() {
@@ -1195,9 +1013,8 @@
     el.btnOcrCancel.disabled = false;
     try {
       const src = await getFullCanvas(page);
-      const img = Imaging.pipeline(src, page.adjust, cornersOf(page), OCR_MAX);
-      const res = await OCR.run(img, {
-        engine: el.ocrEngine.value,
+      const img = Imaging.pipeline(src, page.adjust, page.corners, OCR_MAX);
+      const res = await OCR.recognize(img, {
         lang: el.ocrLang.value,
         psm: el.ocrPsm.value,
         onProgress: (status, prog) => {
@@ -1207,8 +1024,7 @@
       });
       page.ocr = {
         text: res.text, confidence: res.confidence, words: res.words,
-        lang: el.ocrLang.value, engine: el.ocrEngine.value,
-        imgW: img.width, imgH: img.height
+        lang: el.ocrLang.value, imgW: img.width, imgH: img.height
       };
       persistPage(page);
       if (page === cur()) { syncOcrUI(); renderStage(); }
@@ -1242,7 +1058,7 @@
     U.toast('Batch OCR finished', 'good');
   });
 
-  el.btnOcrCancel.addEventListener('click', () => { OCR.cancelAll(); el.btnOcrCancel.disabled = true; });
+  el.btnOcrCancel.addEventListener('click', () => { OCR.cancel(); el.btnOcrCancel.disabled = true; });
 
   el.ocrText.addEventListener('input', () => {
     const p = cur();
@@ -1280,7 +1096,7 @@
 
   async function renderFull(page) {
     const src = await getFullCanvas(page);
-    return Imaging.pipeline(src, page.adjust, cornersOf(page), Infinity);
+    return Imaging.pipeline(src, page.adjust, page.corners, Infinity);
   }
 
   el.btnExportImage.addEventListener('click', async () => {
@@ -1556,10 +1372,6 @@
     if (k === '0') { state.zoom = 0; renderStage(); return; }
     if (k === '+' || k === '=') { zoomBy(1.25); return; }
     if (k === '-') { zoomBy(0.8); return; }
-    if (k === 'ArrowLeft'  && nudgeCorner(-1, 0, e.shiftKey)) { e.preventDefault(); return; }
-    if (k === 'ArrowRight' && nudgeCorner(1, 0, e.shiftKey))  { e.preventDefault(); return; }
-    if (k === 'ArrowUp'    && nudgeCorner(0, -1, e.shiftKey)) { e.preventDefault(); return; }
-    if (k === 'ArrowDown'  && nudgeCorner(0, 1, e.shiftKey))  { e.preventDefault(); return; }
     if (k === 'ArrowLeft') { if (state.current > 0) selectPage(state.current - 1, true); return; }
     if (k === 'ArrowRight') { if (state.current < state.pages.length - 1) selectPage(state.current + 1, true); return; }
     if (k === 'Delete' || k === 'Backspace') { if (state.current >= 0) { e.preventDefault(); deletePage(state.current); } return; }
@@ -1604,12 +1416,5 @@
     }
   })();
 
-  // Small surface for tests and for scripting the app from the console.
-  global.ScannerApp = {
-    state: state,
-    render: renderStage,
-    addCanvas: addPage,
-    sourceFor: getFullCanvas,
-    cornersFor: cornersOf
-  };
+  global.ScannerApp = { state: state, render: renderStage, addCanvas: addPage };
 })(window);

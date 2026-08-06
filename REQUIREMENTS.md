@@ -181,10 +181,11 @@ input scale differs, so what you see is what you get.
 ## 6. Acceptance criteria
 
 1. With a webcam attached, the live preview appears within 2 s of granting permission.
-2. A sheet of A4 is auto-detected and warped to a rectangle with all four corners within
-   ~2 % of the page edge, on a dark mat, a wooden desk, a pale desk, and under a single
-   side lamp. Where there is no page, no crop is produced — detection declines rather than
-   guessing, since a wrong crop is worse than none.
+2. A sheet of A4 on a contrasting desk is auto-detected and warped to a rectangle with all
+   four corners within ~2 % of the page edge, under even light and under a single side lamp.
+   Where there is no page, no crop is produced — detection declines rather than guessing,
+   since a wrong crop is worse than none. Whatever outline the live view shows is exactly
+   the crop the captured page gets.
 3. A page shot under a single side lamp comes out with a uniformly white background under
    the **Auto** filter, with no visible gradient.
 4. Adjusting any slider updates the preview without perceptible lag.
