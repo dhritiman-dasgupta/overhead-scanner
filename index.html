@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Overhead Scanner</title>
+<link rel="stylesheet" href="css/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🖨️</text></svg>">
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ───────────────────────── top bar ───────────────────────── -->
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" class="logo" aria-hidden="true">
+        <path d="M4 7h16M6 7V4h12v3M5 7l-1 8h16l-1-8M8 19h8M9 15v4M15 15v4" />
+        <circle cx="12" cy="11.5" r="2.2"/>
+      </svg>
+      <span>Overhead&nbsp;Scanner</span>
+    </div>
+
+    <div class="topbar-group">
+      <label class="field">
+        <span>Camera</span>
+        <select id="deviceSel"><option value="">— no device —</option></select>
+      </label>
+      <label class="field">
+        <span>Resolution</span>
+        <select id="resSel">
+          <option value="auto">Auto (max)</option>
+          <option value="3840x2160">4K · 3840×2160</option>
+          <option value="2560x1440">1440p · 2560×1440</option>
+          <option value="1920x1080">1080p · 1920×1080</option>
+          <option value="1280x720">720p · 1280×720</option>
+        </select>
+      </label>
+      <button id="btnStart" class="btn btn-primary">Start camera</button>
+      <span id="camStatus" class="chip chip-off">off</span>
+    </div>
+
+    <div class="topbar-group right">
+      <button id="btnHelp" class="btn btn-ghost" title="Keyboard shortcuts (?)">?</button>
+    </div>
+  </header>
+
+  <main class="main">
+
+    <!-- ───────────────────────── page tray ───────────────────────── -->
+    <aside class="tray" id="trayPanel">
+      <div class="tray-head">
+        <span>Pages <b id="pageCount">0</b></span>
+        <div class="tray-head-btns">
+          <button id="btnImport" class="btn btn-tiny" title="Import image files">Import</button>
+          <button id="btnClearAll" class="btn btn-tiny btn-danger" title="Delete all pages">Clear</button>
+        </div>
+      </div>
+      <div class="tray-list" id="tray">
+        <p class="tray-empty">No pages yet.<br>Capture a shot or import an image.</p>
+      </div>
+      <div class="tray-foot"><span id="trayInfo">—</span></div>
+      <input type="file" id="fileInput" accept="image/*" multiple hidden>
+    </aside>
+
+    <!-- ───────────────────────── stage ───────────────────────── -->
+    <section class="stage">
+      <div class="stage-bar">
+        <div class="seg" role="tablist">
+          <button id="modeLive"  class="seg-btn is-on">Live</button>
+          <button id="modeEdit"  class="seg-btn">Edit</button>
+        </div>
+
+        <div class="stage-bar-mid">
+          <button id="btnCapture" class="btn btn-capture" title="Capture (Space)">
+            <span class="dot"></span> Capture
+          </button>
+          <button id="btnAutoCap" class="btn btn-toggle" title="Auto-capture when the scene is still (A)">Auto</button>
+          <div class="motion" title="Scene motion">
+            <div class="motion-bar"><i id="motionFill"></i></div>
+            <span id="motionLbl">—</span>
+          </div>
+        </div>
+
+        <div class="stage-bar-right">
+          <button id="btnCorners" class="btn btn-toggle" title="Adjust page corners (C)">Corners</button>
+          <button id="btnDetect"  class="btn btn-ghost" title="Re-detect page edges (D)">Detect</button>
+          <button id="btnCompare" class="btn btn-ghost" title="Hold to see the original (B)">Before</button>
+          <span class="sep"></span>
+          <button id="btnZoomOut" class="btn btn-ghost">−</button>
+          <button id="btnFit" class="btn btn-ghost" title="Fit to window (0)"><span id="zoomLabel">fit</span></button>
+          <button id="btnZoomIn" class="btn btn-ghost">+</button>
+        </div>
+      </div>
+
+      <div class="stage-view" id="stageView">
+        <div class="viewport" id="viewport">
+          <video id="video" playsinline muted autoplay></video>
+          <canvas id="stageCanvas"></canvas>
+          <canvas id="overlayCanvas"></canvas>
+        </div>
+        <div class="stage-empty" id="stageEmpty">
+          <svg viewBox="0 0 24 24" class="big-icon"><path d="M3 6h18v13H3z"/><path d="M8 6l1.5-2h5L16 6"/><circle cx="12" cy="12.5" r="3.2"/></svg>
+          <h2>Point the camera at a page</h2>
+          <p>Press <kbd>Start camera</kbd>, or import an image to work on.</p>
+        </div>
+        <div class="shutter" id="shutter"></div>
+      </div>
+
+      <div class="stage-foot">
+        <span id="stageInfo">—</span>
+        <span id="stageHint" class="hint"></span>
+      </div>
+    </section>
+
+    <!-- ───────────────────────── inspector ───────────────────────── -->
+    <aside class="inspector">
+      <nav class="tabs">
+        <button class="tab is-on" data-tab="capture">Capture</button>
+        <button class="tab" data-tab="adjust">Adjust</button>
+        <button class="tab" data-tab="ocr">OCR</button>
+        <button class="tab" data-tab="export">Export</button>
+      </nav>
+
+      <!-- ══ Capture ══ -->
+      <div class="pane is-on" data-pane="capture">
+
+        <section class="grp">
+          <h3>Signal</h3>
+          <div class="kv"><span>Negotiated</span><b id="resInfo">—</b></div>
+          <div class="kv"><span>Frame rate</span><b id="fpsInfo">—</b></div>
+        </section>
+
+        <section class="grp">
+          <h3>Auto-capture</h3>
+          <p class="note">Waits for your hands to leave the frame, then shoots. The workflow for turning pages.</p>
+          <label class="row-check"><input type="checkbox" id="autoCapChk"><span>Shoot when the scene is still</span></label>
+          <div class="ctl" data-k="dwell">
+            <label>Stillness required <output>0.6</output>s</label>
+            <input type="range" min="0.2" max="3" step="0.1" value="0.6">
+          </div>
+          <div class="ctl" data-k="sens">
+            <label>Motion sensitivity <output>50</output></label>
+            <input type="range" min="1" max="100" step="1" value="50">
+          </div>
+          <label class="row-check"><input type="checkbox" id="beepChk" checked><span>Shutter sound</span></label>
+        </section>
+
+        <section class="grp">
+          <h3>Interval capture</h3>
+          <label class="row-check"><input type="checkbox" id="intervalChk"><span>Shoot every N seconds</span></label>
+          <div class="ctl" data-k="interval">
+            <label>Interval <output>5</output>s</label>
+            <input type="range" min="1" max="60" step="1" value="5">
+          </div>
+        </section>
+
+        <section class="grp">
+          <h3>Exposure</h3>
+          <div class="btn-row">
+            <button class="btn" id="expDown" title="Darker (,)">− Darker</button>
+            <button class="btn" id="expUp" title="Brighter (.)">+ Brighter</button>
+          </div>
+          <div class="kv"><span id="expWhat">—</span><b id="expValue"></b></div>
+          <div class="ctl" data-k="previewGain">
+            <label>Preview brightness <output>1.0</output>×</label>
+            <input type="range" min="1" max="4" step="0.1" value="1">
+          </div>
+          <p class="note">Preview brightness changes the screen only — captures keep the raw
+            sensor data, which the Adjust tab corrects properly. Use it to see what you're
+            framing when the desk is dim.</p>
+        </section>
+
+        <section class="grp">
+          <h3>Camera controls</h3>
+          <div id="camCaps"><p class="note">Start the camera to see what it exposes.</p></div>
+        </section>
+
+        <section class="grp">
+          <h3>Framing aids</h3>
+          <label class="row-check"><input type="checkbox" id="guideGrid"><span>Rule-of-thirds grid</span></label>
+          <label class="row-check"><input type="checkbox" id="guideCross"><span>Centre cross</span></label>
+          <label class="row-check"><input type="checkbox" id="guideDetect" checked><span>Live edge detection</span></label>
+          <label class="row-check"><input type="checkbox" id="mirrorChk"><span>Mirror preview</span></label>
+          <label class="field wide">
+            <span>Aspect guide</span>
+            <select id="guideAspect">
+              <option value="">none</option>
+              <option value="0.7071">A4 portrait</option>
+              <option value="1.4142">A4 landscape</option>
+              <option value="0.7727">Letter portrait</option>
+              <option value="1.2941">Letter landscape</option>
+              <option value="1">Square</option>
+            </select>
+          </label>
+        </section>
+
+        <section class="grp">
+          <h3>On capture</h3>
+          <label class="row-check"><input type="checkbox" id="autoDetectChk" checked><span>Auto-detect page edges</span></label>
+          <label class="row-check"><input type="checkbox" id="autoSelectChk" checked><span>Jump to the new page</span></label>
+        </section>
+      </div>
+
+      <!-- ══ Adjust ══ -->
+      <div class="pane" data-pane="adjust">
+
+        <section class="grp">
+          <h3>Filter</h3>
+          <div class="filters" id="filters">
+            <button class="fbtn" data-filter="original">Original</button>
+            <button class="fbtn is-on" data-filter="auto">Auto</button>
+            <button class="fbtn" data-filter="color">Colour doc</button>
+            <button class="fbtn" data-filter="gray">Greyscale</button>
+            <button class="fbtn" data-filter="bw">Black &amp; white</button>
+            <button class="fbtn" data-filter="whiteboard">Whiteboard</button>
+            <button class="fbtn" data-filter="ink">Ink boost</button>
+            <button class="fbtn" data-filter="photo">Photo</button>
+          </div>
+        </section>
+
+        <section class="grp">
+          <h3>Crop</h3>
+          <button class="btn btn-toggle wide" id="cropEdit">Edit crop corners</button>
+          <div class="btn-row">
+            <button class="btn btn-ghost" id="cropDetect">Auto-detect</button>
+            <button class="btn btn-ghost" id="cropReset">Whole frame</button>
+          </div>
+          <div class="ctl" data-k="inset">
+            <label>Trim edges <output>0.0</output>%</label>
+            <input type="range" min="-3" max="8" step="0.1" value="0">
+          </div>
+          <div class="kv"><span>Status</span><b id="cropState">—</b></div>
+          <p class="note">In crop mode, drag a corner to move it, or drag an edge to move the
+            whole side. Arrow keys nudge the last corner you touched; hold Shift for bigger steps.</p>
+        </section>
+
+        <section class="grp">
+          <h3>Geometry</h3>
+          <div class="btn-row">
+            <button class="btn btn-ghost" id="rotL" title="Rotate left ([)"><svg class="ico" viewBox="0 0 24 24"><path d="M13 4.07V1L8.45 5.55 13 10V6.09c2.84.48 5 2.94 5 5.91s-2.16 5.43-5 5.91v2.02c3.95-.49 7-3.85 7-7.93s-3.05-7.44-7-7.93zM7.11 8.53L5.7 7.11C4.8 8.27 4.24 9.61 4.07 11h2.02c.14-.87.49-1.72 1.02-2.47zM6.09 13H4.07c.17 1.39.72 2.73 1.62 3.89l1.41-1.42c-.52-.75-.87-1.59-1.01-2.47zm1.01 5.32c1.16.9 2.51 1.44 3.9 1.61V17.9c-.87-.15-1.71-.49-2.46-1.03L7.1 18.32z"/></svg>90°</button>
+            <button class="btn btn-ghost" id="rotR" title="Rotate right (])"><svg class="ico flip" viewBox="0 0 24 24"><path d="M13 4.07V1L8.45 5.55 13 10V6.09c2.84.48 5 2.94 5 5.91s-2.16 5.43-5 5.91v2.02c3.95-.49 7-3.85 7-7.93s-3.05-7.44-7-7.93zM7.11 8.53L5.7 7.11C4.8 8.27 4.24 9.61 4.07 11h2.02c.14-.87.49-1.72 1.02-2.47zM6.09 13H4.07c.17 1.39.72 2.73 1.62 3.89l1.41-1.42c-.52-.75-.87-1.59-1.01-2.47zm1.01 5.32c1.16.9 2.51 1.44 3.9 1.61V17.9c-.87-.15-1.71-.49-2.46-1.03L7.1 18.32z"/></svg>90°</button>
+            <button class="btn btn-ghost" id="flipH">Flip H</button>
+            <button class="btn btn-ghost" id="flipV">Flip V</button>
+          </div>
+          <div class="ctl" data-k="straighten">
+            <label>Straighten <output>0</output>°</label>
+            <input type="range" min="-15" max="15" step="0.1" value="0">
+            <button class="rst" title="Reset to filter default"></button>
+          </div>
+          <label class="field wide">
+            <span>Output size</span>
+            <select id="outSize">
+              <option value="detected">Fit detected page</option>
+              <option value="original">Original pixels</option>
+              <option value="a4">A4 · 2480×3508 (300 dpi)</option>
+              <option value="letter">Letter · 2550×3300 (300 dpi)</option>
+            </select>
+          </label>
+        </section>
+
+        <section class="grp">
+          <h3>Lighting</h3>
+          <div class="ctl" data-k="flatten">
+            <label>Shadow &amp; gradient removal <output>95</output></label>
+            <input type="range" min="0" max="100" step="1" value="95">
+            <button class="rst" title="Reset to filter default"></button>
+          </div>
+          <label class="field wide">
+            <span>White balance</span>
+            <select id="wbSel">
+              <option value="off">Off</option>
+              <option value="gray" selected>Gray world</option>
+              <option value="white">White patch</option>
+            </select>
+          </label>
+          <div class="ctl" data-k="temp">
+            <label>Temperature <output>0</output></label>
+            <input type="range" min="-100" max="100" step="1" value="0"><button class="rst" title="Reset to filter default"></button>
+          </div>
+          <div class="ctl" data-k="tint">
+            <label>Tint <output>0</output></label>
+            <input type="range" min="-100" max="100" step="1" value="0"><button class="rst" title="Reset to filter default"></button>
+          </div>
+        </section>
+
+        <section class="grp">
+          <h3>Tone</h3>
+          <div class="ctl" data-k="exposure">
+            <label>Exposure <output>0</output></label>
+            <input type="range" min="-100" max="100" step="1" value="0"><button class="rst" title="Reset to filter default"></button>
+          </div>
+          <div class="ctl" data-k="contrast">
+            <label>Contrast <output>0</output></label>
+            <input type="range" min="-100" max="100" step="1" value="0"><button class="rst" title="Reset to filter default"></button>
+          </div>
+          <div class="ctl" data-k="gamma">
+            <label>Gamma <output>1.00</output></label>
+            <input type="range" min="0.3" max="3" step="0.01" value="1"><button class="rst" title="Reset to filter default"></button>
+          </div>
+          <div class="ctl" data-k="highlights">
+            <label>Highlights <output>0</output></label>
+            <input type="range" min="-100" max="100" step="1" value="0"><button class="rst" title="Reset to filter default"></button>
+          </div>
+          <div class="ctl" data-k="shadows">
+            <label>Shadows <output>0</output></label>
+            <input type="range" min="-100" max="100" step="1" value="0"><button class="rst" title="Reset to filter default"></button>
+          </div>
+        </section>
+
+        <section class="grp">
+          <h3>Colour</h3>
+          <div class="ctl" data-k="saturation">
+            <label>Saturation <output>0</output></label>
+            <input type="range" min="-100" max="100" step="1" value="0"><button class="rst" title="Reset to filter default"></button>
+          </div>
+          <div class="ctl" data-k="vibrance">
+            <label>Vibrance <output>0</output></label>
+            <input type="range" min="-100" max="100" step="1" value="0"><button class="rst" title="Reset to filter default"></button>
+          </div>
+        </section>
+
+        <section class="grp">
+          <h3>Detail</h3>
+          <div class="ctl" data-k="denoise">
+            <label>Denoise <output>0</output></label>
+            <input type="range" min="0" max="100" step="1" value="0"><button class="rst" title="Reset to filter default"></button>
+          </div>
+          <div class="ctl" data-k="sharpen">
+            <label>Sharpen <output>30</output></label>
+            <input type="range" min="0" max="150" step="1" value="30"><button class="rst" title="Reset to filter default"></button>
+          </div>
+        </section>
+
+        <section class="grp" id="bwGrp">
+          <h3>Black &amp; white</h3>
+          <div class="ctl" data-k="threshold">
+            <label>Threshold bias <output>0</output></label>
+            <input type="range" min="-50" max="50" step="1" value="0"><button class="rst" title="Reset to filter default"></button>
+          </div>
+          <div class="ctl" data-k="window">
+            <label>Local window <output>100</output>%</label>
+            <input type="range" min="20" max="300" step="5" value="100"><button class="rst" title="Reset to filter default"></button>
+          </div>
+        </section>
+
+        <section class="grp">
+          <label class="row-check"><input type="checkbox" id="invertChk"><span>Invert</span></label>
+          <div class="btn-row">
+            <button class="btn btn-ghost" id="btnResetAdjust">Reset all</button>
+            <button class="btn" id="btnApplyAll">Apply to all pages</button>
+          </div>
+        </section>
+      </div>
+
+      <!-- ══ OCR ══ -->
+      <div class="pane" data-pane="ocr">
+        <section class="grp">
+          <h3>Recognition</h3>
+          <label class="field wide">
+            <span>Engine</span>
+            <select id="ocrEngine">
+              <option value="paddle">PaddleOCR — PP-OCRv4 (accurate)</option>
+              <option value="tesseract">Tesseract — faster to start</option>
+            </select>
+          </label>
+          <label class="field wide" id="langRow">
+            <span>Language</span>
+            <select id="ocrLang"><option value="eng">English (eng)</option></select>
+          </label>
+          <label class="field wide">
+            <span>Page segmentation</span>
+            <select id="ocrPsm">
+              <option value="3">Automatic — full page</option>
+              <option value="4">Single column of text</option>
+              <option value="6">Single uniform block</option>
+              <option value="11">Sparse text — find anything</option>
+              <option value="1">Automatic with orientation detect</option>
+            </select>
+          </label>
+          <div class="btn-row">
+            <button class="btn btn-primary" id="btnOcrPage">Read this page</button>
+            <button class="btn" id="btnOcrAll">Read all</button>
+          </div>
+          <button class="btn btn-ghost wide" id="btnOcrCancel" disabled>Cancel</button>
+          <div class="prog"><i id="ocrFill"></i></div>
+          <div class="kv"><span id="ocrStatus">idle</span><b id="ocrConf">—</b></div>
+          <label class="row-check"><input type="checkbox" id="showBoxes"><span>Show word boxes on the image</span></label>
+          <p class="note" id="engineNote"></p>
+          <p class="note">OCR runs on the <em>processed</em> image — a good Black &amp; white or Auto filter usually lifts accuracy more than any OCR setting.</p>
+        </section>
+
+        <section class="grp grow">
+          <h3>Text</h3>
+          <textarea id="ocrText" spellcheck="false" placeholder="Recognised text appears here, and is editable before export."></textarea>
+          <div class="btn-row">
+            <button class="btn btn-ghost" id="btnCopyText">Copy</button>
+            <button class="btn btn-ghost" id="btnSaveText">Save .txt</button>
+          </div>
+        </section>
+      </div>
+
+      <!-- ══ Export ══ -->
+      <div class="pane" data-pane="export">
+        <section class="grp">
+          <h3>This page</h3>
+          <label class="field wide">
+            <span>Format</span>
+            <select id="expFormat">
+              <option value="image/png">PNG — lossless</option>
+              <option value="image/jpeg" selected>JPEG</option>
+              <option value="image/webp">WebP</option>
+            </select>
+          </label>
+          <div class="ctl" data-k="expQuality">
+            <label>Quality <output>92</output></label>
+            <input type="range" min="40" max="100" step="1" value="92">
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-primary" id="btnExportImage">Save image</button>
+            <button class="btn btn-ghost" id="btnCopyClip">Copy</button>
+          </div>
+        </section>
+
+        <section class="grp">
+          <h3>PDF</h3>
+          <label class="field wide">
+            <span>Page size</span>
+            <select id="pdfPageSize">
+              <option value="auto">Match image aspect</option>
+              <option value="a4" selected>A4</option>
+              <option value="letter">Letter</option>
+            </select>
+          </label>
+          <div class="ctl" data-k="pdfQuality">
+            <label>JPEG quality <output>85</output></label>
+            <input type="range" min="40" max="100" step="1" value="85">
+          </div>
+          <label class="row-check"><input type="checkbox" id="pdfSearchable" checked><span>Searchable — embed OCR text layer</span></label>
+          <label class="row-check"><input type="checkbox" id="pdfAllPages" checked><span>All pages (otherwise just this one)</span></label>
+          <button class="btn btn-primary wide" id="btnExportPdf">Save PDF</button>
+          <p class="note" id="pdfNote">Pages without OCR text are embedded as images only.</p>
+        </section>
+
+        <section class="grp">
+          <h3>Other</h3>
+          <div class="btn-row">
+            <button class="btn btn-ghost" id="btnPrint">Print</button>
+            <button class="btn btn-ghost" id="btnExportTextAll">All text .txt</button>
+          </div>
+        </section>
+
+        <section class="grp">
+          <h3>Estimate</h3>
+          <div class="kv"><span>Output pixels</span><b id="estDims">—</b></div>
+          <div class="kv"><span>Approx. size</span><b id="estSize">—</b></div>
+          <button class="btn btn-ghost wide" id="btnEstimate">Measure</button>
+        </section>
+      </div>
+    </aside>
+  </main>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<div class="modal" id="helpModal" hidden>
+  <div class="modal-box">
+    <h2>Keyboard shortcuts</h2>
+    <div class="keys">
+      <div><kbd>Space</kbd><span>Capture</span></div>
+      <div><kbd>A</kbd><span>Toggle auto-capture</span></div>
+      <div><kbd>C</kbd><span>Corner adjust mode</span></div>
+      <div><kbd>D</kbd><span>Re-detect page edges</span></div>
+      <div><kbd>B</kbd><span>Hold — show original</span></div>
+      <div><kbd>L</kbd> / <kbd>E</kbd><span>Live / Edit view</span></div>
+      <div><kbd>←</kbd> <kbd>→</kbd><span>Previous / next page</span></div>
+      <div><kbd>,</kbd> <kbd>.</kbd><span>Camera exposure down / up</span></div>
+      <div><kbd>[</kbd> <kbd>]</kbd><span>Rotate left / right</span></div>
+      <div><kbd>0</kbd><span>Fit to window</span></div>
+      <div><kbd>+</kbd> <kbd>−</kbd><span>Zoom</span></div>
+      <div><kbd>1</kbd>–<kbd>8</kbd><span>Pick filter</span></div>
+      <div><kbd>R</kbd><span>Run OCR on this page</span></div>
+      <div><kbd>Delete</kbd><span>Delete current page</span></div>
+      <div><kbd>?</kbd><span>This help</span></div>
+    </div>
+    <h2>Tips for a clean scan</h2>
+    <ul class="tips">
+      <li>Light the page from two sides if you can; one lamp leaves a gradient that
+          <em>Shadow &amp; gradient removal</em> then has to undo.</li>
+      <li>A dark, matte desk mat makes edge detection almost perfect.</li>
+      <li>For text-only pages, <em>Black &amp; white</em> gives the smallest files and the best OCR.</li>
+      <li>Auto-capture waits for stillness — keep your hand in frame until you want the shot.</li>
+    </ul>
+    <button class="btn btn-primary" id="btnHelpClose">Close</button>
+  </div>
+</div>
+
+<script src="js/util.js"></script>
+<script src="js/geometry.js"></script>
+<script src="js/imaging.js"></script>
+<script src="js/camera.js"></script>
+<script src="js/pdf.js"></script>
+<script src="js/store.js"></script>
+<script src="vendor/tesseract/tesseract.min.js"></script>
+<script src="vendor/onnx/ort.wasm.min.js"></script>
+<script src="js/paddle.js"></script>
+<script src="js/ocr.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
