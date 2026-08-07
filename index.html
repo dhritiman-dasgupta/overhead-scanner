@@ -399,15 +399,17 @@
           <label class="field wide">
             <span>Format</span>
             <select id="expFormat">
-              <option value="image/png">PNG — lossless</option>
-              <option value="image/jpeg" selected>JPEG</option>
+              <option value="image/jpeg" selected>JPEG — high quality</option>
+              <option value="image/png">PNG — lossless, no compression artefacts</option>
               <option value="image/webp">WebP</option>
             </select>
           </label>
           <div class="ctl" data-k="expQuality">
-            <label>Quality <output>92</output></label>
-            <input type="range" min="40" max="100" step="1" value="92">
+            <label>Quality <output>98</output></label>
+            <input type="range" min="40" max="100" step="1" value="98">
           </div>
+          <p class="note">Saved at the full resolution of the crop, always — the slider only
+            sets JPEG compression. Choose PNG if you want no compression artefacts at all.</p>
           <div class="btn-row">
             <button class="btn btn-primary" id="btnExportImage">Save image</button>
             <button class="btn btn-ghost" id="btnCopyClip">Copy</button>
@@ -425,8 +427,8 @@
             </select>
           </label>
           <div class="ctl" data-k="pdfQuality">
-            <label>JPEG quality <output>85</output></label>
-            <input type="range" min="40" max="100" step="1" value="85">
+            <label>JPEG quality <output>94</output></label>
+            <input type="range" min="40" max="100" step="1" value="94">
           </div>
           <label class="row-check"><input type="checkbox" id="pdfSearchable" checked><span>Searchable — embed OCR text layer</span></label>
           <label class="row-check"><input type="checkbox" id="pdfAllPages" checked><span>All pages (otherwise just this one)</span></label>

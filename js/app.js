@@ -3,7 +3,9 @@
   'use strict';
 
   const $ = U.$, $$ = U.$$;
-  const PREVIEW_MAX = 1500;    // long edge used for live preview processing
+  const PREVIEW_FAST = 1400;   // long edge while a control is being dragged
+  const PREVIEW_MAX = 3200;    // ceiling for the settled, display-resolution pass
+  const FULL_CACHE = 3;        // pristine full-resolution frames held in memory
   const OCR_MAX = 2400;        // long edge fed to Tesseract — more is slower, not better
   const THUMB_W = 160;
 
@@ -57,7 +59,7 @@
     settings: {
       device: '', res: 'auto',
       dwell: 0.6, sens: 50, interval: 5, previewGain: 1, photoCapture: true,
-      expQuality: 92, pdfQuality: 85,
+      expQuality: 98, pdfQuality: 94,
       autoCap: false, interval_on: false, beep: true,
       grid: false, cross: false, liveDetect: true, mirror: false, aspect: '',
       autoDetect: true, autoSelect: true,
@@ -101,35 +103,52 @@
       fullCache.delete(page.id); fullCache.set(page.id, c);
       return c;
     }
+    // Only reached once the pristine frame has been evicted, or after a reload.
     const bmp = await decode(page.blob);
     const c = U.canvas(bmp.width, bmp.height);
     Imaging.ctx2d(c).drawImage(bmp, 0, 0);
     if (bmp.close) bmp.close();
     fullCache.set(page.id, c);
-    lru(fullCache, 2);
+    lru(fullCache, FULL_CACHE);
     return c;
   }
 
-  async function getPreviewCanvas(page) {
-    if (prevCache.has(page.id)) {
-      const c = prevCache.get(page.id);
-      prevCache.delete(page.id); prevCache.set(page.id, c);
-      return c;
+  /**
+   * A copy of the source scaled to `maxDim`, cached per page and tier. Two
+   * tiers: a small one that keeps the sliders responsive, and one at the
+   * display's own pixel count for the settled view, so what is on screen is
+   * never a scaled-up smaller render.
+   */
+  async function getSource(page, maxDim) {
+    const tier = maxDim <= PREVIEW_FAST ? 'f' : 'h';
+    const key = page.id + ':' + tier;
+    const hit = prevCache.get(key);
+    if (hit && (tier === 'f' || hit.maxDim >= maxDim - 2)) {
+      prevCache.delete(key); prevCache.set(key, hit);
+      return hit.canvas;
     }
     const full = await getFullCanvas(page);
-    const c = Imaging.fit(full, PREVIEW_MAX);
-    prevCache.set(page.id, c);
-    lru(prevCache, 8);
-    return c;
+    const canvas = Imaging.fit(full, maxDim);
+    prevCache.set(key, { canvas, maxDim });
+    lru(prevCache, 6);
+    return canvas;
   }
 
-  function dropCaches(id) { fullCache.delete(id); prevCache.delete(id); }
+  function dropCaches(id) {
+    fullCache.delete(id);
+    prevCache.delete(id + ':f');
+    prevCache.delete(id + ':h');
+  }
 
   /* ── page creation ──────────────────────────────────────────── */
 
   async function addPage(canvas, opts) {
     opts = opts || {};
-    const blob = await U.canvasToBlob(canvas, 'image/jpeg', 0.94);
+    // The JPEG exists only so the session survives a reload. Everything you
+    // see and everything you export renders from the pristine frame kept below
+    // in fullCache — encoding and immediately decoding again cost a visible
+    // generation on exactly the sharp edges a scanner is for.
+    const blob = await U.canvasToBlob(canvas, 'image/jpeg', 0.96);
     const page = {
       id: U.uid(),
       blob: blob,
@@ -153,8 +172,8 @@
     }
 
     state.pages.push(page);
-    prevCache.set(page.id, Imaging.fit(canvas, PREVIEW_MAX));
-    lru(prevCache, 8);
+    fullCache.set(page.id, canvas);          // keep the sensor frame itself
+    lru(fullCache, FULL_CACHE);
 
     renderTray();
     persistPage(page);
@@ -258,7 +277,7 @@
 
   async function refreshThumb(page) {
     try {
-      const src = await getPreviewCanvas(page);
+      const src = await getSource(page, PREVIEW_FAST);
       const out = Imaging.pipeline(src, page.adjust, page.corners, 420);
       const th = Imaging.fit(out, THUMB_W);
       page.thumb = th.toDataURL('image/jpeg', 0.7);
@@ -299,7 +318,21 @@
 
   const renderStage = U.rafThrottle(function () { renderStageNow(); });
 
-  async function renderStageNow() {
+  /** How many pixels the stage can actually show, so we render exactly that. */
+  function stagePixels() {
+    const box = el.stageView.getBoundingClientRect();
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const want = Math.round(Math.max(box.width, box.height) * dpr * 1.1);
+    return U.clamp(want, PREVIEW_FAST, PREVIEW_MAX);
+  }
+
+  let hiResTimer = 0;
+  function scheduleHiRes() {
+    clearTimeout(hiResTimer);
+    hiResTimer = setTimeout(() => { renderStageNow(true); }, 200);
+  }
+
+  async function renderStageNow(hiRes) {
     const live = state.mode === 'live';
     const page = cur();
     const hasSomething = live ? Camera.running() : !!page;
@@ -323,11 +356,12 @@
       el.stageInfo.textContent = st ? (st.width + '×' + st.height + (st.frameRate ? ' · ' + st.frameRate + ' fps' : '')) : '—';
       if (!Camera.running()) el.stageHint.textContent = '';
     } else {
-      const src = await getPreviewCanvas(page);
+      const cap = hiRes ? stagePixels() : PREVIEW_FAST;
+      const src = await getSource(page, cap);
       const adj = state.compare ? neutralAdjust(page.adjust) : page.adjust;
       const out = state.cornerMode
         ? copyOf(src)
-        : Imaging.pipeline(src, adj, page.corners, PREVIEW_MAX);
+        : Imaging.pipeline(src, adj, page.corners, cap);
       lastProcessed = out;
       el.stageCanvas.width = out.width;
       el.stageCanvas.height = out.height;
@@ -343,6 +377,7 @@
       el.stageHint.textContent = state.cornerMode
         ? 'drag the corners — D re-detects, C when done'
         : (state.compare ? 'showing original' : '');
+      if (!hiRes) scheduleHiRes();
     }
 
     layoutViewport(natW, natH);
@@ -468,7 +503,8 @@
 
   /** Magnified inset while dragging a corner, so you can land on the edge. */
   function drawLoupe(c, W, H) {
-    const src = prevCache.get(cur().id);
+    const entry = prevCache.get(cur().id + ':h') || prevCache.get(cur().id + ':f');
+    const src = entry && entry.canvas;
     if (!src) return;
     const R = 62, Z = 3.2;
     const nx = state.dragPos.x, ny = state.dragPos.y;
@@ -1013,7 +1049,7 @@
   el.btnDetect.addEventListener('click', async () => {
     const page = cur();
     if (!page) { U.toast('No page selected'); return; }
-    const src = await getPreviewCanvas(page);
+    const src = await getFullCanvas(page);     // full resolution: most accurate
     const q = Geom.detect(src);
     if (q) { page.corners = q; U.toast('Page edges detected', 'good'); }
     else { page.corners = null; U.toast('No page edge found — using the full frame'); }
@@ -1358,7 +1394,7 @@
     const urls = [];
     for (const p of list) {
       const c = await renderFull(p);
-      urls.push(Imaging.fit(c, 2000).toDataURL('image/jpeg', 0.9));
+      urls.push(Imaging.fit(c, 3000).toDataURL('image/jpeg', 0.94));
     }
     const w = window.open('', '_blank');
     if (!w) { U.toast('Pop-up blocked — allow pop-ups to print', 'bad'); return; }
@@ -1600,5 +1636,8 @@
     }
   })();
 
-  global.ScannerApp = { state: state, render: renderStage, addCanvas: addPage };
+  // Small surface for tests and for scripting the app from the console.
+  global.ScannerApp = {
+    state: state, render: renderStage, addCanvas: addPage, sourceFor: getFullCanvas
+  };
 })(window);

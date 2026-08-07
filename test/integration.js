@@ -199,6 +199,32 @@ const PROFILE = path.join(os.tmpdir(), 'ohs-int-profile');
   ok('a page with no stated crop is auto-detected', wy.detects);
   ok('an explicit "no crop" is honoured, not re-detected', wy.honoursNull);
 
+  /* Nothing on screen and nothing exported may come from a re-decoded JPEG.
+     The stored blob exists only so a reload can recover the session; encoding
+     and immediately decoding again costs a visible generation on exactly the
+     hard edges a scanner is for (~42 dB PSNR after the sharpen stage). */
+  const psnr = await c.evaluate(`(async function(){
+    var W=900,H=640,cv=U.canvas(W,H),g=Imaging.ctx2d(cv);
+    g.fillStyle='#fff';g.fillRect(0,0,W,H);
+    g.fillStyle='#000';g.font='bold 30px Helvetica, Arial, sans-serif';
+    for(var i=0;i<12;i++) g.fillText('Sharp edges 0123456789 |||||||',40,60+i*46);
+    g.fillStyle='#c00';g.fillRect(600,420,240,160);
+    var page=await ScannerApp.addCanvas(cv,{quad:null,inheritAdjust:false});
+    await new Promise(function(r){setTimeout(r,900);});
+    var ref=Imaging.pipeline(cv,page.adjust,page.corners,1400);
+    var got=Imaging.pipeline(await ScannerApp.sourceFor(page),page.adjust,page.corners,1400);
+    if(ref.width!==got.width||ref.height!==got.height) return -1;
+    var a=Imaging.ctx2d(ref).getImageData(0,0,ref.width,ref.height).data;
+    var b=Imaging.ctx2d(got).getImageData(0,0,got.width,got.height).data;
+    var se=0,n=0;
+    for(var p=0;p<a.length;p+=4){var d=a[p]-b[p];se+=d*d;n++;}
+    var mse=se/n;
+    ScannerApp.state.pages.length=0; ScannerApp.state.current=-1;
+    return mse===0?99:10*Math.log10(255*255/mse);
+  })()`);
+  ok('rendered from the pristine frame, not a JPEG of it', psnr > 45,
+     psnr < 0 ? 'size mismatch' : psnr.toFixed(1) + ' dB vs the original canvas');
+
   ok('no uncaught exceptions during the run', errors.length === 0, errors.join(' | ').slice(0, 200));
 
   console.log('\n' + (fail ? '\x1b[31m' : '\x1b[32m') + pass + ' passed, ' + fail + ' failed\x1b[0m');

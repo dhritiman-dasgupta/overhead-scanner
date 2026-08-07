@@ -150,9 +150,18 @@ temperature/tint → tone curve → saturation/vibrance → denoise → sharpen 
 filter mode (grey / adaptive threshold) → invert
 ```
 
-The same function renders the preview and the export; only the input scale differs, so
-what you see is what you get. Preview caps at 1500 px on the long edge (≈11–42 ms per
-update), OCR at 2400 px, export is uncapped.
+The same function renders the preview and the export; only the input scale differs, so what
+you see is what you get. The preview runs in two tiers — 1400 px on the long edge while a
+control is being dragged, then a settled pass at the display's own pixel count once you stop
+(up to 3200 px), so what is on screen is never a small render scaled up. OCR gets 2400 px.
+**Export is uncapped and always full resolution**; the quality slider only sets JPEG
+compression, and PNG is there if you want none.
+
+Nothing is rendered from a re-decoded JPEG. The capture canvas itself is held in memory for
+the pages you are working on, and the stored JPEG (q0.96) exists only so a reload can
+recover the session. Encoding and immediately decoding again costs a visible generation on
+exactly the hard glyph edges a scanner is for — about 42 dB PSNR after the sharpen stage,
+which the integration test guards against.
 
 Two pieces are worth knowing about if you touch the code:
 
@@ -244,6 +253,8 @@ into a `<video>`.
   page, or use a glass platen.
 - The camera's own controls (zoom, focus, exposure) appear only if the browser exposes
   them; many UVC cameras expose nothing, in which case use their driver utility.
-- Pages are held as JPEG (q0.94), so an edited page is one generation from the sensor.
-  Export before you close if that matters.
+- What you see and what you export come from the pristine sensor frame, held in memory for
+  the few pages you are working on. Session restore falls back to the stored JPEG (q0.96),
+  so a page recovered after a reload is one generation from the sensor — export before
+  closing if that matters.
 - Chrome supports "Copy image"; Safari and Firefox may refuse the clipboard write.
