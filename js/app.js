@@ -907,7 +907,20 @@
 
   async function capture() {
     if (!Camera.running()) { U.toast('Start the camera first'); return; }
-    // Always take the full-size still where the camera has one.
+    // Don't shoot the preview frame just because the still probe hasn't
+    // finished yet. It runs for a few seconds after the camera starts, and
+    // capturing during that window silently produced a preview-resolution
+    // scan — a tenth of the pixels, with nothing on screen to say so.
+    if (state.settings.photoCapture) {
+      const pp = Camera.photoProbe || {};
+      if (pp.state === 'unknown' || pp.state === 'probing') {
+        el.stageHint.textContent = 'checking capture resolution…';
+        for (let i = 0; i < 40 && ((Camera.photoProbe || {}).state === 'unknown' ||
+                                   (Camera.photoProbe || {}).state === 'probing'); i++) {
+          await new Promise((r) => setTimeout(r, 250));
+        }
+      }
+    }
     const usePhoto = state.settings.photoCapture && Camera.canPhoto();
     const shot = await Camera.grab(state.settings.mirror, usePhoto);
     if (!shot) return;
@@ -921,7 +934,25 @@
     const transfers = !shot.viaPhoto || Camera.viewMatches();
     const quad = transfers ? (state.settings.liveDetect ? state.liveQuad : null)
                            : (state.settings.autoDetect ? Geom.detect(shot) : null);
-    await addPage(shot, { quad: quad });
+    const page = await addPage(shot, { quad: quad });
+
+    // Say what was actually captured. Silence here is how a preview-resolution
+    // scan goes unnoticed until you zoom into the exported file.
+    const out = Imaging.targetSize(page.adjust, page.corners, page.w, page.h, Infinity);
+    const st = Camera.settings();
+    const fellBack = state.settings.photoCapture && !shot.viaPhoto &&
+                     st && Camera.photoProbe && Camera.photoProbe.state !== 'ok';
+    // How much of the sensor actually landed on the page. A crop is only ever
+    // as sharp as the pixels that fell on it, and a small subject in a big
+    // frame is the usual reason an export looks soft when zoomed — nothing is
+    // downscaled, there were simply never that many pixels on the page.
+    const covers = Math.round(100 * Math.sqrt((out.w * out.h) / (page.w * page.h)));
+    const thin = covers < 55;
+    U.toast(shot.width + '×' + shot.height + (shot.viaPhoto ? ' still' : ' video frame') +
+            ' → ' + out.w + '×' + out.h +
+            (fellBack ? ' · no full-size still on this camera' : '') +
+            (thin ? ' · page fills only ' + covers + '% of the frame — move the camera closer for more detail' : ''),
+            fellBack || thin ? '' : 'good', thin ? 5200 : 3200);
   }
 
   el.btnCapture.addEventListener('click', capture);

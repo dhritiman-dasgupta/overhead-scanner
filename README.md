@@ -63,9 +63,13 @@ the filter's value.
   crushes the paper/desk difference detection relies on.
 - **Refocus** after changing how high the camera sits. Overhead modules hunt, or lock onto
   the desk rather than the page.
-- Watch **Capture → crop** in the Capture tab. It shows what a shot will produce after
-  cropping, and roughly what dpi that is for an A4 sheet — if it reads much under 200 dpi,
-  move the camera closer or raise the resolution before scanning a stack.
+- **Fill the frame with the page.** This is the single biggest lever on how sharp a scan is,
+  and the easiest to overlook. A crop is only ever as sharp as the sensor pixels that landed
+  on it: a 16 MP capture of a page covering a third of the frame yields a ~1400 px scan, and
+  no amount of processing puts detail back. Nothing is being downscaled when that happens —
+  there were never that many pixels on the page. **Capture → crop** in the Capture tab shows
+  the result and roughly what dpi it is for A4; capture warns you when the page covers less
+  than about half the frame.
 - **Glossy pages**: raise the camera and tilt the lamp, rather than fighting the reflection
   in software.
 - If the page isn't found, the status bar under the image says so and the whole frame is
