@@ -23,6 +23,8 @@
     stageInfo: $('#stageInfo'), stageHint: $('#stageHint'),
     resInfo: $('#resInfo'), fpsInfo: $('#fpsInfo'), camCaps: $('#camCaps'),
     expUp: $('#expUp'), expDown: $('#expDown'), expWhat: $('#expWhat'), expValue: $('#expValue'),
+    expAuto: $('#expAuto'), pageLevel: $('#pageLevel'), btnRefocus: $('#btnRefocus'),
+    photoInfo: $('#photoInfo'), cropInfo: $('#cropInfo'), photoChk: $('#photoChk'),
     autoCapChk: $('#autoCapChk'), beepChk: $('#beepChk'),
     intervalChk: $('#intervalChk'),
     guideGrid: $('#guideGrid'), guideCross: $('#guideCross'), guideDetect: $('#guideDetect'),
@@ -54,7 +56,7 @@
     dragPos: null,
     settings: {
       device: '', res: 'auto',
-      dwell: 0.6, sens: 50, interval: 5, previewGain: 1,
+      dwell: 0.6, sens: 50, interval: 5, previewGain: 1, photoCapture: true,
       expQuality: 92, pdfQuality: 85,
       autoCap: false, interval_on: false, beep: true,
       grid: false, cross: false, liveDetect: true, mirror: false, aspect: '',
@@ -576,6 +578,7 @@
         el.deviceSel.value = state.settings.device || el.deviceSel.value;
         el.resInfo.textContent = st.width + '×' + st.height;
         el.fpsInfo.textContent = st.frameRate ? st.frameRate + ' fps' : '—';
+        updateCaptureInfo();
       }
       Geom.resetSticky();
       el.camStatus.textContent = 'live';
@@ -607,6 +610,7 @@
     el.resInfo.textContent = '—';
     el.fpsInfo.textContent = '—';
     el.camCaps.innerHTML = '<p class="note">Start the camera to see what it exposes.</p>';
+    el.photoInfo.textContent = '—'; el.cropInfo.textContent = '—'; el.pageLevel.textContent = '—';
     state.liveQuad = null;
     renderStage();
   }
@@ -670,6 +674,78 @@
 
   /* ── exposure ───────────────────────────────────────────────── */
 
+  const levelCanvas = U.canvas(160, 120);
+
+  function insideQuad(q, x, y) {
+    let sign = 0;
+    for (let i = 0; i < 4; i++) {
+      const a = q[i], b = q[(i + 1) % 4];
+      const cr = (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x);
+      const c = cr > 0 ? 1 : cr < 0 ? -1 : 0;
+      if (!c) continue;
+      if (!sign) sign = c; else if (c !== sign) return false;
+    }
+    return true;
+  }
+
+  /**
+   * How bright the paper reads right now, 0..255.
+   *
+   * Measured inside the detected page — or the middle of the frame if there
+   * isn't one — and taken as the 90th percentile rather than the mean, because
+   * the mean of a page is dragged down by its own text. This is the number the
+   * camera's own metering gets wrong: it averages the whole desk, so a small
+   * bright page on a large dark mat comes out murky.
+   */
+  function measurePageLevel() {
+    const v = el.video;
+    if (!v || !v.videoWidth) return 0;
+    const c = Imaging.ctx2d(levelCanvas);
+    c.drawImage(v, 0, 0, 160, 120);
+    const d = c.getImageData(0, 0, 160, 120).data;
+    const q = state.liveQuad;
+    const hist = new Int32Array(256);
+    let n = 0;
+    for (let y = 0; y < 120; y++) {
+      for (let x = 0; x < 160; x++) {
+        const nx = (x + 0.5) / 160, ny = (y + 0.5) / 120;
+        if (q ? !insideQuad(q, nx, ny)
+              : (nx < 0.25 || nx > 0.75 || ny < 0.25 || ny > 0.75)) continue;
+        const p = (y * 160 + x) * 4;
+        hist[Math.min(255, (d[p] * 0.2126 + d[p + 1] * 0.7152 + d[p + 2] * 0.0722) | 0)]++;
+        n++;
+      }
+    }
+    if (!n) return 0;
+    let acc = 0;
+    for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc >= n * 0.9) return i; }
+    return 255;
+  }
+
+  /** What a capture will actually produce, before and after the crop. */
+  function updateCaptureInfo() {
+    const st = Camera.settings();
+    if (!st || !st.width) {
+      el.photoInfo.textContent = '—'; el.cropInfo.textContent = '—';
+      return;
+    }
+    const bigger = Camera.photoIsBigger();
+    el.photoInfo.textContent = !Camera.photoMax ? 'not offered'
+      : Camera.photoMax.w + '×' + Camera.photoMax.h + (bigger ? '' : ' (no bigger)');
+
+    const usePhoto = state.settings.photoCapture && bigger;
+    const src = usePhoto ? Camera.photoMax : { w: st.width, h: st.height };
+    const q = state.liveQuad;
+    const out = q ? Geom.outputSize(q, src.w, src.h) : { w: src.w, h: src.h };
+    // rough dpi if that crop is an A4 sheet — the number that decides whether
+    // small print will survive
+    const dpi = Math.round(Math.max(out.w, out.h) / 11.69);
+    el.cropInfo.textContent = src.w + '×' + src.h + ' → ' + out.w + '×' + out.h +
+                              (q ? '  ≈' + dpi + ' dpi' : '');
+  }
+
+
+
   async function nudgeExposure(dir) {
     if (!Camera.running()) { U.toast('Start the camera first'); return; }
     const r = await Camera.nudgeExposure(dir);
@@ -683,6 +759,43 @@
   }
   el.expUp.addEventListener('click', () => nudgeExposure(1));
   el.expDown.addEventListener('click', () => nudgeExposure(-1));
+
+  el.expAuto.addEventListener('click', async () => {
+    if (!Camera.running()) { U.toast('Start the camera first'); return; }
+    el.expAuto.disabled = true;
+    const label = el.expAuto.textContent;
+    const before = measurePageLevel();
+    try {
+      const r = await Camera.autoExpose(measurePageLevel, {
+        onStep: (i, level) => {
+          el.pageLevel.textContent = Math.round(level) + ' / 255';
+          el.expAuto.textContent = 'Levelling… ' + Math.round(level);
+        }
+      });
+      if (!r) {
+        U.toast('This camera exposes no exposure control to the browser — add light, or raise Preview brightness', 'bad', 6000);
+        return;
+      }
+      el.expWhat.textContent = r.label;
+      el.expValue.textContent = fmtNum(r.value);
+      el.pageLevel.textContent = Math.round(r.level) + ' / 255';
+      buildCapControls();
+      U.toast((r.settled ? 'Levelled' : 'At this camera\'s limit') +
+              ' — page ' + Math.round(before) + ' → ' + Math.round(r.level) + ' / 255',
+              r.settled ? 'good' : '', 5000);
+    } finally {
+      el.expAuto.disabled = false;
+      el.expAuto.textContent = label;
+    }
+  });
+
+  el.btnRefocus.addEventListener('click', async () => {
+    if (!Camera.running()) { U.toast('Start the camera first'); return; }
+    const ok = await Camera.refocus();
+    U.toast(ok ? 'Refocusing…' : 'This camera exposes no focus control to the browser',
+            ok ? 'good' : 'bad', ok ? 2000 : 5000);
+    setTimeout(buildCapControls, 600);
+  });
 
   function applyPreviewGain() {
     const g = state.settings.previewGain || 1;
@@ -748,6 +861,8 @@
       updateLiveQuad(Geom.detect(el.video, { sticky: true }));
     } catch (e) { live.quad = null; }
     state.liveQuad = live.quad;
+    updateCaptureInfo();
+    el.pageLevel.textContent = Math.round(measurePageLevel()) + ' / 255';
     el.stageHint.textContent = state.liveQuad
       ? 'page found' + (state.settings.autoCap ? ' · auto-capture armed' : '')
       : 'no page outline — the whole frame will be captured';
@@ -764,7 +879,8 @@
 
   async function capture() {
     if (!Camera.running()) { U.toast('Start the camera first'); return; }
-    const shot = Camera.grab(state.settings.mirror);
+    const shot = await Camera.grab(state.settings.mirror,
+                                   state.settings.photoCapture && Camera.photoIsBigger());
     if (!shot) return;
     el.shutter.classList.remove('flash');
     void el.shutter.offsetWidth;
@@ -1218,6 +1334,7 @@
     renderStage();
   });
   bindSetting(el.beepChk, 'beep', 'checked');
+  bindSetting(el.photoChk, 'photoCapture', 'checked', updateCaptureInfo);
   bindSetting(el.guideGrid, 'grid', 'checked', drawOverlay);
   bindSetting(el.guideCross, 'cross', 'checked', drawOverlay);
   bindSetting(el.guideDetect, 'liveDetect', 'checked', drawOverlay);
@@ -1279,6 +1396,7 @@
     el.autoCapChk.checked = st.autoCap;
     el.btnAutoCap.classList.toggle('is-on', st.autoCap);
     el.beepChk.checked = st.beep;
+    el.photoChk.checked = st.photoCapture !== false;
     el.intervalChk.checked = st.interval_on;
     el.guideGrid.checked = st.grid; el.guideCross.checked = st.cross;
     el.guideDetect.checked = st.liveDetect; el.mirrorChk.checked = st.mirror;

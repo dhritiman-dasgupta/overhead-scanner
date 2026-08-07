@@ -127,8 +127,14 @@
 
         <section class="grp">
           <h3>Signal</h3>
-          <div class="kv"><span>Negotiated</span><b id="resInfo">—</b></div>
+          <div class="kv"><span>Video stream</span><b id="resInfo">—</b></div>
           <div class="kv"><span>Frame rate</span><b id="fpsInfo">—</b></div>
+          <div class="kv"><span>Still capture</span><b id="photoInfo">—</b></div>
+          <div class="kv"><span>Capture → crop</span><b id="cropInfo">—</b></div>
+          <label class="row-check"><input type="checkbox" id="photoChk" checked><span>Shoot the full-size still</span></label>
+          <p class="note">The live view is only the preview stream. Where the camera offers a
+            larger still, capture takes that instead — on a page filling half the frame that is
+            the difference between a soft scan and a sharp one. Costs a moment's shutter delay.</p>
         </section>
 
         <section class="grp">
@@ -157,11 +163,13 @@
 
         <section class="grp">
           <h3>Exposure</h3>
+          <button class="btn btn-primary wide" id="expAuto">Auto-level for the page</button>
           <div class="btn-row">
             <button class="btn" id="expDown" title="Darker (,)">− Darker</button>
             <button class="btn" id="expUp" title="Brighter (.)">+ Brighter</button>
           </div>
           <div class="kv"><span id="expWhat">—</span><b id="expValue"></b></div>
+          <div class="kv"><span>Page brightness</span><b id="pageLevel">—</b></div>
           <div class="ctl" data-k="previewGain">
             <label>Preview brightness <output>1.0</output>×</label>
             <input type="range" min="1" max="4" step="0.1" value="1">
@@ -169,6 +177,14 @@
           <p class="note">Preview brightness changes the screen only — captures keep the raw
             sensor data, which the Adjust tab corrects properly. Use it to see what you're
             framing when the desk is dim.</p>
+        </section>
+
+        <section class="grp">
+          <h3>Focus</h3>
+          <button class="btn wide" id="btnRefocus">Refocus now</button>
+          <p class="note">Overhead rigs often hunt, or lock onto the desk instead of the page.
+            Refocus after changing how high the camera sits. If your camera offers manual
+            focus it appears under Camera controls below.</p>
         </section>
 
         <section class="grp">

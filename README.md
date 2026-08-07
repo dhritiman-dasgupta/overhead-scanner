@@ -56,8 +56,16 @@ the filter's value.
 - **A dark, matte desk mat** makes edge detection close to perfect. Detection works from the
   brightness difference between the page and what surrounds it, so the bigger that
   difference, the better. A pale or paper-coloured desk is the hard case.
-- **Raise the exposure** (<kbd>.</kbd>) before blaming detection. An under-exposed frame
-  crushes the paper/desk difference that everything downstream relies on.
+- **Auto-level for the page** before blaming anything else. An overhead rig meters the whole
+  desk, so a bright page on a dark mat comes out murky — the camera is exposing for the mat.
+  The button measures the paper itself and searches for the setting that puts it where it
+  belongs; <kbd>,</kbd> and <kbd>.</kbd> nudge it by hand. An under-exposed frame also
+  crushes the paper/desk difference detection relies on.
+- **Refocus** after changing how high the camera sits. Overhead modules hunt, or lock onto
+  the desk rather than the page.
+- Watch **Capture → crop** in the Capture tab. It shows what a shot will produce after
+  cropping, and roughly what dpi that is for an A4 sheet — if it reads much under 200 dpi,
+  move the camera closer or raise the resolution before scanning a stack.
 - **Glossy pages**: raise the camera and tilt the lamp, rather than fighting the reflection
   in software.
 - If the page isn't found, the status bar under the image says so and the whole frame is
@@ -106,6 +114,16 @@ test/                 see below
 ```
 
 Classic scripts, no modules and no bundler, deliberately: it means the folder runs as-is.
+
+### Getting the most pixels onto the page
+
+`getUserMedia`'s `ideal` is a soft preference — the browser picks whatever supported mode
+sits near it, and will happily hand back 720p from a camera that can do 4K. So once the
+track exists, which is the first point at which it will state its real maximum, the app asks
+again for that maximum. Capture then prefers `ImageCapture.takePhoto()` where the device's
+still is meaningfully larger than the preview stream, falling back to the video frame when
+it isn't, isn't offered, or times out. On a page filling half the frame that is the
+difference between a soft scan and a sharp one.
 
 ### Processing order
 
@@ -157,6 +175,7 @@ Two pieces are worth knowing about if you touch the code:
 ```bash
 node test/algorithms.test.js      # 54 assertions, no browser needed
 node test/detection.test.js       # 16 desk setups; --ppm dumps each scene to /tmp
+node test/camera.test.js          # camera plumbing, via Chrome's fake device
 ```
 
 `algorithms.test.js` covers the homography and warp, illumination flattening, adaptive
@@ -191,6 +210,14 @@ Drives `index.html` in headless Chrome over the DevTools protocol: imports an im
 the actual file input, then checks the tray, thumbnail, auto-detection, filter switching,
 rotation, export sizing and deletion, and asserts nothing threw. Set `CHROME=` to point at
 a different browser binary.
+
+`camera.test.js` covers the plumbing around capture: that `start()` completes at all (every
+step in it interrogates the driver, and both `video.play()` and `getPhotoCapabilities()` can
+simply never settle — which hung camera start with nothing to show for it), that the track
+gets pushed to the device's real maximum resolution, and that the still-capture probe and
+the exposure/focus controls degrade rather than throw. Anything that reads pixels needs a
+real camera: headless Chrome hands out a MediaStream but never decodes fake-device frames
+into a `<video>`.
 
 ---
 
