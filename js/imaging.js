@@ -23,7 +23,7 @@
     flatten: 65, wb: 'gray', temp: 0, tint: 0,
     exposure: 0, contrast: 0, gamma: 1, highlights: 0, shadows: 0,
     saturation: 0, vibrance: 0,
-    denoise: 0, sharpen: 30,
+    denoise: 0, sharpen: 16,
     threshold: 0, window: 100,
     invert: false,
     rotate: 0, flipH: false, flipV: false, straighten: 0,
@@ -33,13 +33,13 @@
   /* Presets. `mode` decides the final stage: colour, greyscale or bilevel. */
   I.FILTERS = {
     original:   { mode: 'color', flatten: 0,   wb: 'off',   contrast: 0,  gamma: 1,    saturation: 0,  vibrance: 0, sharpen: 0,  denoise: 0, exposure: 0, highlights: 0, shadows: 0, temp: 0, tint: 0 },
-    auto:       { mode: 'color', flatten: 95,  wb: 'gray',  contrast: 18, gamma: 1,    saturation: 6,  vibrance: 10, sharpen: 30, denoise: 0, exposure: 0, highlights: 0, shadows: 0 },
-    color:      { mode: 'color', flatten: 95,  wb: 'white', contrast: 26, gamma: 1.05, saturation: 14, vibrance: 18, sharpen: 38, denoise: 4, exposure: 2, highlights: -6, shadows: 4 },
-    gray:       { mode: 'gray',  flatten: 95,  wb: 'gray',  contrast: 22, gamma: 1,    saturation: 0,  vibrance: 0, sharpen: 32, denoise: 4, exposure: 0, highlights: 0, shadows: 0 },
-    bw:         { mode: 'bw',    flatten: 100, wb: 'gray',  contrast: 10, gamma: 1,    saturation: 0,  vibrance: 0, sharpen: 20, denoise: 8, exposure: 0, highlights: 0, shadows: 0, threshold: 0, window: 100 },
-    whiteboard: { mode: 'color', flatten: 100, wb: 'white', contrast: 42, gamma: 1.1,  saturation: 45, vibrance: 25, sharpen: 26, denoise: 10, exposure: 4, highlights: -10, shadows: 0 },
-    ink:        { mode: 'gray',  flatten: 100, wb: 'gray',  contrast: 56, gamma: 0.82, saturation: 0,  vibrance: 0, sharpen: 46, denoise: 6, exposure: -2, highlights: 0, shadows: -12 },
-    photo:      { mode: 'color', flatten: 0,   wb: 'off',   contrast: 8,  gamma: 1,    saturation: 8,  vibrance: 12, sharpen: 15, denoise: 0, exposure: 0, highlights: 0, shadows: 0 }
+    auto:       { mode: 'color', flatten: 95,  wb: 'gray',  contrast: 18, gamma: 1,    saturation: 6,  vibrance: 10, sharpen: 16, denoise: 0, exposure: 0, highlights: 0, shadows: 0 },
+    color:      { mode: 'color', flatten: 95,  wb: 'white', contrast: 26, gamma: 1.05, saturation: 14, vibrance: 18, sharpen: 20, denoise: 4, exposure: 2, highlights: -6, shadows: 4 },
+    gray:       { mode: 'gray',  flatten: 95,  wb: 'gray',  contrast: 22, gamma: 1,    saturation: 0,  vibrance: 0, sharpen: 18, denoise: 4, exposure: 0, highlights: 0, shadows: 0 },
+    bw:         { mode: 'bw',    flatten: 100, wb: 'gray',  contrast: 10, gamma: 1,    saturation: 0,  vibrance: 0, sharpen: 12, denoise: 8, exposure: 0, highlights: 0, shadows: 0, threshold: 0, window: 100 },
+    whiteboard: { mode: 'color', flatten: 100, wb: 'white', contrast: 42, gamma: 1.1,  saturation: 45, vibrance: 25, sharpen: 14, denoise: 10, exposure: 4, highlights: -10, shadows: 0 },
+    ink:        { mode: 'gray',  flatten: 100, wb: 'gray',  contrast: 56, gamma: 0.82, saturation: 0,  vibrance: 0, sharpen: 26, denoise: 6, exposure: -2, highlights: 0, shadows: -12 },
+    photo:      { mode: 'color', flatten: 0,   wb: 'off',   contrast: 8,  gamma: 1,    saturation: 8,  vibrance: 12, sharpen: 8, denoise: 0, exposure: 0, highlights: 0, shadows: 0 }
   };
 
   I.newAdjust = function () { return Object.assign({}, I.DEFAULTS, I.FILTERS.auto, { filter: 'auto' }); };
@@ -127,7 +127,25 @@
       }
     }
 
-    const out = boxBlur(L, bw, bh, Math.max(2, Math.round(Math.min(bw, bh) / 3)));
+    // Two readings, and the estimate is the larger of them.
+    //
+    //   broad  — heavily blurred, so it passes a lamp's falloff through and
+    //            ignores content; but whatever surrounds the paper drags it
+    //            down, and a page that does not fill the frame has dark mat on
+    //            the other side of its edge. The gain then climbs and lifts the
+    //            *ink* along with the paper, which bleaches text and blows the
+    //            page white near its edges.
+    //   local  — the block maxima barely smoothed: what paper actually reads
+    //            here, when there is paper here.
+    //
+    // Taking max(broad, 0.8·local) fixes that without giving up the blur's one
+    // real job. On a smooth gradient `broad` already exceeds it and nothing
+    // changes; over a dark photo inside a page `local` is the photo's own dark
+    // level and `broad` wins, so the photo is not blown to white.
+    const broad = boxBlur(L, bw, bh, Math.max(2, Math.round(Math.min(bw, bh) / 3)));
+    const local = boxBlur(L, bw, bh, 1);
+    const out = new Float32Array(bw * bh);
+    for (let i = 0; i < out.length; i++) out[i] = Math.max(broad[i], local[i] * 0.8);
 
     // Floor the map well below the paper level but nowhere near black. At 15%
     // of peak, a frame that is mostly dark mat gets gains approaching 7×, which
@@ -172,9 +190,12 @@
       let p = y * w * 4;
       for (let x = 0; x < w; x++, p += 4) {
         const g = sampleBilinear(gain, bg.w, bg.h, (x + 0.5) / w, fy);
-        data[p]     = clamp(data[p]     * g, 0, 255);
-        data[p + 1] = clamp(data[p + 1] * g, 0, 255);
-        data[p + 2] = clamp(data[p + 2] * g, 0, 255);
+        // Soft shoulder here too. A hard clamp at 255 during the divide is what
+        // flattened printed detail on an already-bright label into blank white
+        // before the tone curve ever saw it.
+        data[p]     = shoulder(data[p]     * g);
+        data[p + 1] = shoulder(data[p + 1] * g);
+        data[p + 2] = shoulder(data[p + 2] * g);
       }
     }
   }
@@ -240,6 +261,12 @@
 
   const KNEE = 232;          // where the highlight roll-off begins
 
+  /** Compress above the knee instead of clipping, so bright detail survives. */
+  function shoulder(v) {
+    if (v <= KNEE) return v < 0 ? 0 : v;
+    return KNEE + (255 - KNEE) * Math.tanh((v - KNEE) / (255 - KNEE));
+  }
+
   function toneLUT(a) {
     const lut = new Uint8ClampedArray(256);
     const c = clamp(a.contrast, -100, 100) * 2.55;
@@ -300,25 +327,59 @@
     }
   }
 
-  /** Unsharp mask against a 3×3 box blur. */
+  /**
+   * Unsharp mask, at a radius that scales with the image.
+   *
+   * A fixed 3×3 kernel sharpens a different thing at every resolution: at
+   * preview size it works on strokes, at 16 MP it works on grain. That made the
+   * export both noisier than the preview and different from it, which breaks
+   * the promise that what you see is what you get.
+   */
   function sharpen(data, w, h, amount) {
     const amt = amount / 100;
+    const r = clamp(Math.round(Math.max(w, h) / 1500), 1, 6);
     const src = new Uint8ClampedArray(data);
+    const blur = boxBlurRGB(src, w, h, r);
+    for (let i = 0; i < data.length; i += 4) {
+      // Roll the overshoot off rather than clipping it. An unsharp mask
+      // deliberately overshoots at an edge; clamping that at 255 turns the
+      // bright side of every stroke into flat white, which is how sharpening
+      // ends up destroying the printed detail it was meant to bring out.
+      data[i]     = shoulder(src[i]     + (src[i]     - blur[i])     * amt);
+      data[i + 1] = shoulder(src[i + 1] + (src[i + 1] - blur[i + 1]) * amt);
+      data[i + 2] = shoulder(src[i + 2] + (src[i + 2] - blur[i + 2]) * amt);
+    }
+  }
+
+  /** Separable box blur over RGBA, running sums so cost is independent of r. */
+  function boxBlurRGB(src, w, h, r) {
+    const tmp = new Float32Array(src.length), out = new Float32Array(src.length);
+    const win = r * 2 + 1;
     for (let y = 0; y < h; y++) {
-      const ym = (y > 0 ? y - 1 : 0) * w, y0 = y * w, yp = (y < h - 1 ? y + 1 : h - 1) * w;
-      for (let x = 0; x < w; x++) {
-        const xm = x > 0 ? x - 1 : 0, xp = x < w - 1 ? x + 1 : w - 1;
-        const i4 = (y0 + x) * 4;
-        for (let c = 0; c < 3; c++) {
-          const blur = (
-            src[(ym + xm) * 4 + c] + src[(ym + x) * 4 + c] + src[(ym + xp) * 4 + c] +
-            src[(y0 + xm) * 4 + c] + src[i4 + c]           + src[(y0 + xp) * 4 + c] +
-            src[(yp + xm) * 4 + c] + src[(yp + x) * 4 + c] + src[(yp + xp) * 4 + c]
-          ) / 9;
-          data[i4 + c] = clamp(src[i4 + c] + (src[i4 + c] - blur) * amt, 0, 255);
+      const row = y * w * 4;
+      for (let c = 0; c < 3; c++) {
+        let acc = 0;
+        for (let k = -r; k <= r; k++) acc += src[row + clamp(k, 0, w - 1) * 4 + c];
+        for (let x = 0; x < w; x++) {
+          tmp[row + x * 4 + c] = acc / win;
+          acc += src[row + clamp(x + r + 1, 0, w - 1) * 4 + c] -
+                 src[row + clamp(x - r, 0, w - 1) * 4 + c];
         }
       }
     }
+    for (let x = 0; x < w; x++) {
+      const col = x * 4;
+      for (let c = 0; c < 3; c++) {
+        let acc = 0;
+        for (let k = -r; k <= r; k++) acc += tmp[clamp(k, 0, h - 1) * w * 4 + col + c];
+        for (let y = 0; y < h; y++) {
+          out[y * w * 4 + col + c] = acc / win;
+          acc += tmp[clamp(y + r + 1, 0, h - 1) * w * 4 + col + c] -
+                 tmp[clamp(y - r, 0, h - 1) * w * 4 + col + c];
+        }
+      }
+    }
+    return out;
   }
 
   /* ── bilevel ────────────────────────────────────────────────── */

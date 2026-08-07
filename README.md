@@ -165,9 +165,26 @@ which the integration test guards against.
 
 Two pieces are worth knowing about if you touch the code:
 
+- **Nothing clips.** Highlights roll off above 232 rather than being clamped at 255 — in the
+  divide, in the tone curve, and in the sharpener. Each of those was independently capable of
+  turning printed detail on a bright label into blank white. An unsharp mask *deliberately*
+  overshoots at an edge; clamping that overshoot is how sharpening ends up destroying the
+  detail it was meant to reveal.
+
+- **Sharpening scales with the image.** A fixed 3×3 kernel sharpens strokes at preview size
+  and grain at 16 MP, so the export came out both noisier than the preview and different
+  from it. The radius now tracks the long edge, and the amounts were recalibrated downwards
+  to match, since the same number bites far harder at full resolution.
+
 - **Illumination flattening** estimates the paper level as a per-block *maximum* of
-  luminance (which reads straight through text), blurs it hard because illumination is by
-  definition low-frequency, and divides. Strength interpolates the gain geometrically
+  luminance (which reads straight through text), and takes the larger of two readings: a
+  heavily blurred one, which passes a lamp's falloff through and ignores content, and the
+  barely-smoothed block maxima, which is what paper actually reads *here*. The blur alone
+  lets whatever surrounds the paper drag the estimate down — a page that doesn't fill the
+  frame has dark mat on the other side of its edge — so the gain climbs and lifts the ink
+  along with the paper, bleaching text near the page edges. Taking the maximum of the two
+  fixes that without losing the blur's one real job, which is not blowing a dark photo
+  inside a page to white. Strength interpolates the gain geometrically
   (`gain^s`), not the output — blending the output linearly leaves a residual gradient
   proportional to `1−s`, so half strength would still show the lamp.
 - **Page detection** thresholds the frame with Otsu, dilates to close the gaps that lines of

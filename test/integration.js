@@ -132,7 +132,10 @@ const PROFILE = path.join(os.tmpdir(), 'ohs-int-profile');
   const autoStage = await stage();
   ok('stage shows a processed page', autoStage.w > 100 && autoStage.h > 100,
      autoStage.w + '×' + autoStage.h);
-  ok('Auto filter produced white paper', autoStage.mean > 175 && autoStage.max === 255,
+  // >=250 rather than ==255: highlights now roll off instead of clipping, so a
+  // pixel pinned at pure white is no longer expected — that was the behaviour
+  // that flattened print on a bright label into blank paper.
+  ok('Auto filter produced white paper', autoStage.mean > 175 && autoStage.max >= 250,
      'mean ' + autoStage.mean + ', max ' + autoStage.max);
 
   // switch filter through the real button
