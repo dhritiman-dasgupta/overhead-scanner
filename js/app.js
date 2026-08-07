@@ -587,6 +587,7 @@
       buildCapControls();
       setMode('live');
       saveSettings();
+      probeStill();
       U.toast('Camera running — ' + (st ? st.width + '×' + st.height : ''), 'good');
     } catch (err) {
       el.camStatus.textContent = 'error';
@@ -624,6 +625,27 @@
     state.settings.res = el.resSel.value; saveSettings();
     if (Camera.running()) startCamera();
   });
+
+  /**
+   * Find out what a capture will really be, once the preview is already up.
+   * Takes an actual photo, so it costs a couple of seconds — worth it, since
+   * getPhotoCapabilities() lies about the size on at least one real camera.
+   */
+  async function probeStill() {
+    Camera.photoProbe = { state: 'probing' };
+    updateCaptureInfo();
+    const pp = await Camera.probePhoto();
+    if ((!pp || pp.state !== 'ok') && el.resSel.value === 'auto') {
+      // No usable still, so the stream itself has to carry the resolution.
+      await Camera.raiseStream();
+      const st = Camera.settings();
+      if (st) el.resInfo.textContent = st.width + '×' + st.height;
+    }
+    updateCaptureInfo();
+    if (pp && pp.state === 'ok' && !pp.sameView) {
+      U.toast('This camera\'s still shows a wider view than the preview — captures will be re-detected instead of using the on-screen outline', '', 7000);
+    }
+  }
 
   /** Build sliders/toggles for whatever MediaStreamTrack controls exist. */
   function buildCapControls() {
@@ -729,13 +751,19 @@
       el.photoInfo.textContent = '—'; el.cropInfo.textContent = '—';
       return;
     }
-    const bigger = Camera.photoIsBigger();
-    el.photoInfo.textContent = !Camera.photoMax ? 'not offered'
-      : Camera.photoMax.w + '×' + Camera.photoMax.h + (bigger ? '' : ' (no bigger)');
+    const pp = Camera.photoProbe || { state: 'unknown' };
+    el.photoInfo.textContent =
+        pp.state === 'ok' ? pp.w + '×' + pp.h + (pp.sameView ? '' : ' · different view')
+      : pp.state === 'probing' ? 'checking…'
+      : pp.state === 'failed' ? 'not available'
+      : pp.state === 'unsupported' ? 'not supported'
+      : '—';
 
-    const usePhoto = state.settings.photoCapture && bigger;
-    const src = usePhoto ? Camera.photoMax : { w: st.width, h: st.height };
-    const q = state.liveQuad;
+    const usePhoto = state.settings.photoCapture && Camera.canPhoto();
+    const src = usePhoto ? { w: pp.w, h: pp.h } : { w: st.width, h: st.height };
+    // An outline drawn on the preview only means something on a frame that
+    // shows the same view.
+    const q = (usePhoto && !pp.sameView) ? null : state.liveQuad;
     const out = q ? Geom.outputSize(q, src.w, src.h) : { w: src.w, h: src.h };
     // rough dpi if that crop is an A4 sheet — the number that decides whether
     // small print will survive
@@ -879,14 +907,21 @@
 
   async function capture() {
     if (!Camera.running()) { U.toast('Start the camera first'); return; }
-    const shot = await Camera.grab(state.settings.mirror,
-                                   state.settings.photoCapture && Camera.photoIsBigger());
+    // Always take the full-size still where the camera has one.
+    const usePhoto = state.settings.photoCapture && Camera.canPhoto();
+    const shot = await Camera.grab(state.settings.mirror, usePhoto);
     if (!shot) return;
     el.shutter.classList.remove('flash');
     void el.shutter.offsetWidth;
     el.shutter.classList.add('flash');
     if (state.settings.beep) U.beep(1100, 70);
-    await addPage(shot, { quad: state.settings.liveDetect ? state.liveQuad : null });
+    // The on-screen outline belongs to the preview frame. If the still shows a
+    // different view, it does not apply to this image — detect on the capture
+    // itself rather than crop to something that was never there.
+    const transfers = !shot.viaPhoto || Camera.viewMatches();
+    const quad = transfers ? (state.settings.liveDetect ? state.liveQuad : null)
+                           : (state.settings.autoDetect ? Geom.detect(shot) : null);
+    await addPage(shot, { quad: quad });
   }
 
   el.btnCapture.addEventListener('click', capture);

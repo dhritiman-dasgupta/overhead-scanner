@@ -11,8 +11,15 @@
     onMotion: null
   };
 
+  /* 'auto' deliberately asks for 1080p, not the sensor maximum.
+     A document camera's top mode is a *stills* mode: one tested unit negotiates
+     4656×3496 at 10 fps and takes 66 seconds to produce its first frame, which
+     leaves the preview dead and capture with nothing to grab. Resolution for
+     the scan comes from takePhoto() instead, which returns the full 16 MP while
+     the stream stays smooth. Where takePhoto isn't available, raiseStream()
+     climbs afterwards — and verifies frames still arrive. */
   const RES = {
-    auto: [3840, 2160],
+    auto: [1920, 1080],
     '3840x2160': [3840, 2160],
     '2560x1440': [2560, 1440],
     '1920x1080': [1920, 1080],
@@ -67,58 +74,187 @@
       // not depend on playback having begun.
       await withTimeout(C.video.play(), 2000);
     }
-    // Both of these interrogate the driver, and both can simply never come
-    // back on some cameras — getPhotoCapabilities() in particular. Neither is
-    // essential, so cap them: a stalled probe must not hang camera start.
-    if (!resKey || resKey === 'auto') await withTimeout(pushToMax(), 2500);
-    await withTimeout(initPhoto(), 2500);
+    // Frames must actually arrive; a mode can negotiate fine and then deliver
+    // nothing. The still probe is deliberately not awaited — it costs seconds.
+    await waitForFrames(3000);
+    C.photoProbe = { state: 'unknown' };
+    if (!resKey || resKey === 'auto') await withTimeout(fitPreview(), 9000);
     startMotionLoop();
     return C.settings();
   };
 
   /**
-   * `ideal` is a soft preference: the browser picks whatever supported mode
-   * sits near it and will happily hand back 720p from a camera that can do 4K.
-   * Once the track exists it will tell us its real maximum, so ask again.
+   * Put the preview on the sensor's own aspect ratio, at a size that streams.
+   *
+   * This is what makes a full-resolution capture usable at all. The still comes
+   * out at the sensor's native shape — 4:3 on the unit tested — and a 16:9
+   * preview is a *crop* of that, not a scaled version of it: the frames differ
+   * in field of view, so the outline drawn on the preview lands somewhere else
+   * on the capture. Match the shape and the two agree, and the operator frames
+   * exactly what will be photographed.
    */
-  async function pushToMax() {
+  async function fitPreview() {
     if (!C.track || !C.track.getCapabilities) return;
     let caps;
     try { caps = C.track.getCapabilities(); } catch (e) { return; }
-    if (!caps || !caps.width || !caps.height) return;
-    const now = C.track.getSettings ? C.track.getSettings() : {};
-    const maxW = caps.width.max, maxH = caps.height.max;
-    if (!maxW || !maxH) return;
-    if ((now.width || 0) >= maxW && (now.height || 0) >= maxH) return;
-    try {
-      await C.track.applyConstraints({ width: { ideal: maxW }, height: { ideal: maxH } });
-    } catch (e) { /* keep whatever we negotiated */ }
+    if (!caps.width || !caps.width.max || !caps.height || !caps.height.max) return;
+    const aspect = caps.width.max / caps.height.max;
+
+    for (const h of [1200, 960, 720]) {
+      const now = C.track.getSettings();
+      const w = Math.round(h * aspect / 2) * 2;
+      if (Math.abs((now.width / now.height) - aspect) < 0.02 && (now.frameRate || 0) >= 20) return;
+      try {
+        await C.track.applyConstraints({ width: { ideal: w }, height: { ideal: h } });
+      } catch (e) { continue; }
+      const st = C.track.getSettings();
+      if (!await waitForVideoSize(st.width, 3500)) continue;   // negotiated but never rendered
+      if ((st.frameRate || 0) >= 20) return;                   // smooth enough, stop here
+    }
   }
+
+  /** Resolve once the video element is actually showing frames. */
+  function waitForFrames(ms) {
+    const v = C.video;
+    if (!v) return Promise.resolve(false);
+    if (v.videoWidth) return Promise.resolve(true);
+    return new Promise((res) => {
+      const t0 = Date.now();
+      (function tick() {
+        if (!C.track || C.track.readyState !== 'live') return res(false);
+        if (v.videoWidth) return res(true);
+        if (Date.now() - t0 > ms) return res(false);
+        setTimeout(tick, 120);
+      })();
+    });
+  }
+  C.waitForFrames = waitForFrames;
 
   /**
-   * Many cameras offer a still noticeably larger than the video stream. Find
-   * out once, at start, so the UI can say what a capture will actually be.
+   * Find out what a still is really worth by taking one.
+   *
+   * getPhotoCapabilities() cannot be trusted for this: on a camera that returns
+   * a 4656×3496 photo it reported 1920×1080, simply echoing the stream size. So
+   * the only honest answer comes from actually taking a photo and measuring it.
+   * Costs a few seconds, so it runs after the preview is already live.
    */
-  async function initPhoto() {
+  C.probePhoto = async function () {
     C.imageCapture = null;
-    C.photoMax = null;
-    if (typeof ImageCapture === 'undefined' || !C.track) return;
+    if (typeof ImageCapture === 'undefined' || !C.track) {
+      return (C.photoProbe = { state: 'unsupported' });
+    }
+    const t0 = Date.now();
     try {
       const ic = new ImageCapture(C.track);
-      const caps = await ic.getPhotoCapabilities();
+      const blob = await withTimeout(ic.takePhoto(), 9000);
+      if (!blob) throw new Error('takePhoto timed out');
+      const bmp = await createImageBitmap(blob);
+      const st = C.settings() || { width: 0, height: 0 };
       C.imageCapture = ic;
-      if (caps && caps.imageWidth && caps.imageHeight) {
-        C.photoMax = { w: caps.imageWidth.max, h: caps.imageHeight.max };
-      }
-    } catch (e) { C.imageCapture = null; C.photoMax = null; }
+      // Bigger is not enough — it has to be the *same view*. A still whose
+      // field of view differs from the preview would silently move the crop.
+      const match = fovMatch(bmp);
+      C.photoProbe = {
+        state: 'ok', w: bmp.width, h: bmp.height, ms: Date.now() - t0,
+        match: +match.toFixed(3),
+        sameView: match >= 0.82,
+        bigger: bmp.width * bmp.height > st.width * st.height * 1.1 && match >= 0.82
+      };
+      if (bmp.close) bmp.close();
+    } catch (e) {
+      C.photoProbe = { state: 'failed', error: (e && e.message) || String(e) };
+    }
+    return C.photoProbe;
+  };
+
+  /**
+   * How closely a still matches the live frame, 0..1.
+   *
+   * Both are squashed into the same small box and compared by correlation. If
+   * the still covers a wider view than the preview, the same features land in
+   * different places once stretched and the correlation drops — which is the
+   * signal that cropping a capture with the preview's outline would be wrong.
+   */
+  function fovMatch(bitmap) {
+    const v = C.video;
+    if (!v || !v.videoWidth) return 0;
+    const W = 96, H = 72;
+    const a = grayBox(v, W, H), b = grayBox(bitmap, W, H);
+    let ma = 0, mb = 0;
+    for (let i = 0; i < a.length; i++) { ma += a[i]; mb += b[i]; }
+    ma /= a.length; mb /= b.length;
+    let num = 0, da = 0, db = 0;
+    for (let i = 0; i < a.length; i++) {
+      const x = a[i] - ma, y = b[i] - mb;
+      num += x * y; da += x * x; db += y * y;
+    }
+    const den = Math.sqrt(da * db);
+    return den > 1e-6 ? Math.max(0, num / den) : 0;
   }
 
-  /** Does the still beat the video frame enough to be worth the shutter delay? */
-  C.photoIsBigger = function () {
-    const s = C.settings();
-    if (!C.photoMax || !s || !s.width) return false;
-    return C.photoMax.w * C.photoMax.h > s.width * s.height * 1.1;
+  function grayBox(src, W, H) {
+    const c = U.canvas(W, H);
+    const g = c.getContext('2d', { willReadFrequently: true });
+    g.drawImage(src, 0, 0, W, H);
+    const d = g.getImageData(0, 0, W, H).data;
+    const out = new Float32Array(W * H);
+    for (let i = 0, p = 0; i < out.length; i++, p += 4) {
+      out[i] = d[p] * 0.2126 + d[p + 1] * 0.7152 + d[p + 2] * 0.0722;
+    }
+    return out;
+  }
+
+  /** A still is available and was measured. */
+  C.canPhoto = () => !!(C.photoProbe && C.photoProbe.state === 'ok');
+  /** ...and it shows the same view as the preview, so the outline transfers. */
+  C.viewMatches = () => !!(C.photoProbe && C.photoProbe.sameView);
+  C.photoIsBigger = () => !!(C.photoProbe && C.photoProbe.state === 'ok' && C.photoProbe.bigger);
+
+  /**
+   * Climb towards the sensor's maximum, one step at a time, keeping only a mode
+   * that still delivers frames. For a camera with no usable still this is the
+   * only way to get resolution — but blindly applying the maximum is what broke
+   * the preview, so every step is verified and reverted if it goes quiet.
+   */
+  C.raiseStream = async function () {
+    if (!C.track || !C.track.getCapabilities) return null;
+    let caps;
+    try { caps = C.track.getCapabilities(); } catch (e) { return null; }
+    if (!caps.width || !caps.width.max) return null;
+    const start = C.track.getSettings();
+
+    const ladder = [[caps.width.max, caps.height.max], [3840, 2160], [2560, 1440]]
+      .filter((wh) => wh[0] > (start.width || 0));
+
+    for (const wh of ladder) {
+      const prev = C.track.getSettings();
+      try {
+        await C.track.applyConstraints({ width: { ideal: wh[0] }, height: { ideal: wh[1] } });
+      } catch (e) { continue; }
+      const now = C.track.getSettings();
+      if ((now.width || 0) <= (prev.width || 0)) continue;      // didn't move
+      if (await waitForVideoSize(now.width, 3500)) return C.settings();
+      // negotiated but never rendered — put it back
+      try {
+        await C.track.applyConstraints({ width: { ideal: prev.width }, height: { ideal: prev.height } });
+      } catch (e) {}
+      await waitForVideoSize(prev.width, 3000);
+    }
+    return null;
   };
+
+  function waitForVideoSize(w, ms) {
+    const v = C.video;
+    if (!v) return Promise.resolve(false);
+    return new Promise((res) => {
+      const t0 = Date.now();
+      (function tick() {
+        if (v.videoWidth === w) return res(true);
+        if (Date.now() - t0 > ms) return res(false);
+        setTimeout(tick, 120);
+      })();
+    });
+  }
 
   C.stop = function () {
     stopMotionLoop();

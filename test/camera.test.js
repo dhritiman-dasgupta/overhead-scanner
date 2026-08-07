@@ -9,9 +9,12 @@
  *   - start() completing at all. Every step in it interrogates the driver, and
  *     video.play() and getPhotoCapabilities() can both simply never settle.
  *     That hung camera start completely, with no error to show for it.
- *   - pushing the track to the device's real maximum resolution afterwards,
- *     since `ideal` only asks nicely.
- *   - probing for a larger still, and deciding whether it is worth using.
+ *   - the preview landing on the sensor's aspect ratio at a frame rate that is
+ *     actually smooth, rather than on the sensor maximum. The top mode is a
+ *     stills mode: one tested camera negotiates 4656x3496 at 10 fps and takes
+ *     66 seconds to deliver a first frame.
+ *   - probing the still by taking one, since getPhotoCapabilities() reported
+ *     1920x1080 on a camera whose takePhoto() returns 4656x3496.
  *
  *   node test/camera.test.js [origin]
  */
@@ -89,29 +92,45 @@ const ok = (n, c, d) => {
   // through start(), while the capability probes are still outstanding. Waiting
   // on the UI is what proves start() returned.
   ok('camera start completes (does not hang on a driver probe)', status === 'live', startMs + ' ms');
-  ok('start finished promptly', status === 'live' && startMs < 9000, startMs + ' ms');
+  // headless burns the frame-wait timeout because it never decodes frames
+  ok('start finished promptly', status === 'live' && startMs < 12000, startMs + ' ms');
 
   // ── resolution ──
   const res = await ev("document.getElementById('resInfo').textContent");
   ok('stream resolution is reported', /^\d+×\d+$/.test(res), res);
 
-  const capMax = await ev(`(function(){
+  // Deliberately NOT the sensor maximum: the top mode is a stills mode that
+  // streams at 10 fps or not at all. What matters is that the preview shares
+  // the sensor's aspect ratio, so the outline drawn on it transfers to the
+  // full-resolution still, and that it stays smooth.
+  const shape = await ev(`(function(){
     var c = Camera.track.getCapabilities ? Camera.track.getCapabilities() : {};
-    return (c.width && c.width.max) ? c.width.max + '×' + c.height.max : 'unknown';
+    var s = Camera.settings();
+    if (!c.width || !c.width.max) return 'unknown';
+    return JSON.stringify({ sensor: +(c.width.max / c.height.max).toFixed(3),
+                            preview: +(s.width / s.height).toFixed(3),
+                            fps: Math.round(s.frameRate || 0) });
   })()`);
-  ok('track was pushed to the device maximum, not the negotiated default',
-     capMax === 'unknown' || res === capMax, 'got ' + res + ', device max ' + capMax);
+  const sh = shape === 'unknown' ? null : JSON.parse(shape);
+  ok('preview uses the sensor aspect ratio, so the outline transfers to a still',
+     !sh || Math.abs(sh.sensor - sh.preview) < 0.03, shape);
+  ok('preview stays smooth', !sh || sh.fps >= 20 || sh.fps === 0, shape);
 
   // ── still capture ──
-  const photo = await ev("JSON.stringify(Camera.photoMax)");
-  ok('still-capture capability was probed without hanging', photo !== undefined, photo);
-  const consistent = await ev(`(function(){
-    var s = Camera.settings(), p = Camera.photoMax, bigger = Camera.photoIsBigger();
-    if (!p) return bigger === false;
-    return bigger === (p.w * p.h > s.width * s.height * 1.1);
-  })()`);
-  ok('photoIsBigger() agrees with the numbers', consistent === true,
-     'photo ' + photo + ' vs stream ' + res);
+  let probe = {};
+  for (let i = 0; i < 60; i++) {
+    probe = JSON.parse(await ev("JSON.stringify(Camera.photoProbe||{})"));
+    if (probe.state && probe.state !== 'unknown' && probe.state !== 'probing') break;
+    await sleep(400);
+  }
+  ok('the still probe reaches a verdict rather than hanging',
+     ['ok', 'failed', 'unsupported'].indexOf(probe.state) >= 0, JSON.stringify(probe));
+  ok('a usable still reports its size and whether it shows the same view',
+     probe.state !== 'ok' || (probe.w > 0 && probe.h > 0 && typeof probe.sameView === 'boolean'),
+     JSON.stringify(probe));
+  ok('capture only trusts the on-screen outline when the views match',
+     probe.state !== 'ok' || (probe.sameView === (probe.match >= 0.82)),
+     'match ' + probe.match);
   ok('still-capture readout rendered',
      (await ev("document.getElementById('photoInfo').textContent")) !== '—',
      await ev("document.getElementById('photoInfo').textContent"));

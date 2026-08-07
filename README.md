@@ -117,13 +117,26 @@ Classic scripts, no modules and no bundler, deliberately: it means the folder ru
 
 ### Getting the most pixels onto the page
 
-`getUserMedia`'s `ideal` is a soft preference — the browser picks whatever supported mode
-sits near it, and will happily hand back 720p from a camera that can do 4K. So once the
-track exists, which is the first point at which it will state its real maximum, the app asks
-again for that maximum. Capture then prefers `ImageCapture.takePhoto()` where the device's
-still is meaningfully larger than the preview stream, falling back to the video frame when
-it isn't, isn't offered, or times out. On a page filling half the frame that is the
-difference between a soft scan and a sharp one.
+Preview and capture are deliberately not the same thing.
+
+A document camera's top mode is a **stills** mode. The unit this was developed against
+reports a 4656×3496 maximum, and asking the *stream* for it yields 10 fps and a first frame
+after **66 seconds** — a dead preview and nothing to capture. So the stream is set to the
+sensor's aspect ratio at a size that actually moves (1598×1200 at 30 fps on that camera),
+and the resolution for the scan comes from `ImageCapture.takePhoto()`, which returns the
+full 4656×3496 in about three seconds while the preview stays live.
+
+Two things make that safe:
+
+- **The preview matches the sensor's aspect ratio.** A 16:9 preview of a 4:3 sensor is a
+  *crop*, not a scaled copy — the two differ in field of view, so an outline drawn on the
+  preview lands somewhere else on the still. Matching the shape makes them agree.
+- **The match is measured, not assumed.** At start-up the app takes one photo and correlates
+  it against the live frame. If they don't line up, the capture is re-detected instead of
+  being cropped with an outline that doesn't belong to it.
+
+`getPhotoCapabilities()` is not used to decide any of this: on the tested camera it reported
+1920×1080 for a still that actually comes back at 4656×3496.
 
 ### Processing order
 

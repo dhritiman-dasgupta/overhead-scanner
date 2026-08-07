@@ -129,9 +129,13 @@
 
     const out = boxBlur(L, bw, bh, Math.max(2, Math.round(Math.min(bw, bh) / 3)));
 
+    // Floor the map well below the paper level but nowhere near black. At 15%
+    // of peak, a frame that is mostly dark mat gets gains approaching 7×, which
+    // multiplies sensor noise into the visible grain you see on a black
+    // background. 35% still allows the ~2.6× a real side lamp needs.
     let peak = 1;
     for (let i = 0; i < out.length; i++) if (out[i] > peak) peak = out[i];
-    const floor = Math.max(16, peak * 0.15);          // never divide by ~zero
+    const floor = Math.max(16, peak * 0.35);
     for (let i = 0; i < out.length; i++) if (out[i] < floor) out[i] = floor;
 
     return { l: out, w: bw, h: bh };
@@ -161,7 +165,7 @@
     const bg = backgroundMap(data, w, h);
     const s = clamp(strength, 0, 100) / 100;
     const gain = new Float32Array(bg.w * bg.h);
-    for (let i = 0; i < gain.length; i++) gain[i] = clamp(Math.pow(255 / bg.l[i], s), 0.2, 8);
+    for (let i = 0; i < gain.length; i++) gain[i] = clamp(Math.pow(255 / bg.l[i], s), 0.2, 3.5);
 
     for (let y = 0; y < h; y++) {
       const fy = (y + 0.5) / h;
@@ -177,15 +181,39 @@
 
   /* ── white balance ──────────────────────────────────────────── */
 
+  /**
+   * Where the paper sits, as a luminance. Used to restrict white balance to the
+   * page: averaging the *whole* frame is the classic grey-world assumption, and
+   * it is badly wrong for a scanner, where most of the frame can be a black mat
+   * whose own colour cast then gets corrected as if it were the document.
+   */
+  function paperLevel(data, stride) {
+    const hist = new Int32Array(256);
+    let cnt = 0;
+    for (let p = 0; p < data.length; p += stride) {
+      hist[Math.min(255, (data[p] * 0.2126 + data[p + 1] * 0.7152 + data[p + 2] * 0.0722) | 0)]++;
+      cnt++;
+    }
+    let acc = 0;
+    for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc >= cnt * 0.9) return i; }
+    return 255;
+  }
+
   function whiteBalance(data, w, h, mode) {
     const n = w * h;
     const stride = Math.max(1, Math.floor(n / 40000)) * 4;   // sample, don't scan
     let gr = 1, gg = 1, gb = 1;
 
     if (mode === 'gray') {
+      // Grey-world over the lighter half of the page only.
+      const cut = Math.max(24, paperLevel(data, stride) * 0.55);
       let sr = 0, sg = 0, sb = 0, cnt = 0;
-      for (let p = 0; p < data.length; p += stride) { sr += data[p]; sg += data[p + 1]; sb += data[p + 2]; cnt++; }
-      if (!cnt) return;
+      for (let p = 0; p < data.length; p += stride) {
+        const lum = data[p] * 0.2126 + data[p + 1] * 0.7152 + data[p + 2] * 0.0722;
+        if (lum < cut) continue;
+        sr += data[p]; sg += data[p + 1]; sb += data[p + 2]; cnt++;
+      }
+      if (cnt < 32) return;                       // nothing paper-like to balance on
       const mr = sr / cnt, mg = sg / cnt, mb = sb / cnt, mean = (mr + mg + mb) / 3;
       gr = mean / (mr || 1); gg = mean / (mg || 1); gb = mean / (mb || 1);
     } else if (mode === 'white') {
@@ -210,6 +238,8 @@
 
   /* ── tone ───────────────────────────────────────────────────── */
 
+  const KNEE = 232;          // where the highlight roll-off begins
+
   function toneLUT(a) {
     const lut = new Uint8ClampedArray(256);
     const c = clamp(a.contrast, -100, 100) * 2.55;
@@ -223,6 +253,10 @@
       const n = v / 255;
       if (a.shadows)    v += a.shadows * 1.15 * Math.pow(1 - n, 2.2);
       if (a.highlights) v += a.highlights * 1.15 * Math.pow(n, 2.2);
+      // Soft shoulder. Contrast pushes anything already near white straight
+      // past 255, and a hard clip there erases print on a bright label — the
+      // detail is in the image, and rolling it off keeps it.
+      if (v > KNEE) v = KNEE + (255 - KNEE) * Math.tanh((v - KNEE) / (255 - KNEE));
       lut[i] = clamp(Math.round(v), 0, 255);
     }
     return lut;
