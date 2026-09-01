@@ -1,5 +1,8 @@
 # Overhead Scanner
 
+> **Related:** [`overhead-scanner-py`](https://github.com/dhritiman-dasgupta/overhead-scanner-py) — Desktop sibling of this project, full-resolution capture in Python.
+
+
 A browser app for an overhead document camera: capture, deskew, clean up, OCR, and export
 to searchable PDF. Everything runs locally — no uploads, no build step, no network at
 runtime. Tesseract and the English language data are vendored in `vendor/`.
